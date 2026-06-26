@@ -1,0 +1,14 @@
+[package]
+name = "apex-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+apex-secrets = { path = "../apex-secrets" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "apex-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "apex"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+apex-ui = { path = "../../crates/apex-ui" }
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+schema_version = 1
+id = "fixture-workspace-variables"
+name = "Fixture workspace variables"
+
+[[variables]]
+name = "service"
+enabled = true
+sensitivity = "public"
+description = "Shared service metadata"
+source = "literal"
+value_kind = "json"
+value = "{\"version\":\"v1\",\"region\":\"local\"}"

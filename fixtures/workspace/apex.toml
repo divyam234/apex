@@ -1,0 +1,5 @@
+schema_version = 1
+workspace_id = "fixture-workspace"
+name = "Fixture Workspace"
+default_environment = "development"
+trust = "untrusted"

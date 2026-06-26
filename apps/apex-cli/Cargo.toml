@@ -1,0 +1,25 @@
+[package]
+name = "apex-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "apex"
+path = "src/main.rs"
+
+[dependencies]
+apex-domain = { path = "../../crates/apex-domain" }
+apex-import = { path = "../../crates/apex-import" }
+apex-http = { path = "../../crates/apex-http" }
+apex-history = { path = "../../crates/apex-history" }
+apex-runner = { path = "../../crates/apex-runner" }
+apex-secrets = { path = "../../crates/apex-secrets" }
+apex-variables = { path = "../../crates/apex-variables" }
+apex-workspace = { path = "../../crates/apex-workspace" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

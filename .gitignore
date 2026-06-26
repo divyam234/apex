@@ -1,0 +1,6 @@
+/target
+/.apex
+*.tmp
+*.swp
+.DS_Store
+result

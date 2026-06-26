@@ -1,0 +1,21 @@
+schema_version = 1
+id = "development"
+name = "Development"
+
+[[variables]]
+name = "base_url"
+enabled = true
+sensitivity = "public"
+description = "Local fixture endpoint"
+source = "literal"
+value_kind = "string"
+value = "http://127.0.0.1:8080"
+
+[[variables]]
+name = "access_token"
+enabled = true
+sensitivity = "secret"
+description = "Resolved from the configured secret stores"
+source = "secret"
+secret_namespace = "development"
+secret_name = "access-token"

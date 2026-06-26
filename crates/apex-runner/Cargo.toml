@@ -1,0 +1,12 @@
+[package]
+name = "apex-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.apexapi.local/workspace/v1",
+  "title": "ApexAPI workspace manifest v1",
+  "type": "object",
+  "required": ["schema_version", "workspace_id", "name", "trust"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "workspace_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+    "name": { "type": "string", "minLength": 1 },
+    "default_environment": { "type": "string" },
+    "trust": { "enum": ["untrusted", "trusted"] }
+  },
+  "additionalProperties": true
+}

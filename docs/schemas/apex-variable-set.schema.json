@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.apexapi.local/variable-set/v1",
+  "title": "ApexAPI workspace or environment variable set v1",
+  "type": "object",
+  "required": ["schema_version", "id", "name", "variables"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+    "name": { "type": "string", "minLength": 1 },
+    "variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variable" }
+    }
+  },
+  "$defs": {
+    "sensitivity": { "enum": ["public", "sensitive", "secret"] },
+    "variable": {
+      "type": "object",
+      "required": ["name", "enabled", "sensitivity", "source"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+        "enabled": { "type": "boolean" },
+        "sensitivity": { "$ref": "#/$defs/sensitivity" },
+        "description": { "type": "string" },
+        "source": { "enum": ["literal", "secret", "process_environment"] },
+        "value_kind": { "enum": ["null", "bool", "number", "string", "json"] },
+        "value": {},
+        "secret_namespace": { "type": "string" },
+        "secret_name": { "type": "string" },
+        "environment_name": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,256}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "secret" } } },
+          "then": {
+            "required": ["secret_namespace", "secret_name"],
+            "properties": { "sensitivity": { "const": "secret" } }
+          }
+        },
+        {
+          "if": { "properties": { "source": { "const": "process_environment" } } },
+          "then": { "required": ["environment_name"] }
+        },
+        {
+          "if": { "properties": { "source": { "const": "literal" } } },
+          "then": {
+            "required": ["value_kind"],
+            "not": { "properties": { "sensitivity": { "const": "secret" } } }
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

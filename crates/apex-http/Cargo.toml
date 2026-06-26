@@ -1,0 +1,30 @@
+[package]
+name = "apex-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-auth = { path = "../apex-auth" }
+apex-domain = { path = "../apex-domain" }
+apex-runner = { path = "../apex-runner" }
+async-compression.workspace = true
+bytes.workspace = true
+cookie_store.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+apex-test-support = { path = "../apex-test-support" }
+
+[lints]
+workspace = true

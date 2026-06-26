@@ -1,0 +1,22 @@
+[package]
+name = "apex-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-channel.workspace = true
+apex-domain = { path = "../apex-domain" }
+apex-http = { path = "../apex-http" }
+apex-runner = { path = "../apex-runner" }
+apex-secrets = { path = "../apex-secrets" }
+apex-variables = { path = "../apex-variables" }
+apex-workspace = { path = "../apex-workspace" }
+gpui.workspace = true
+gpui-component.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

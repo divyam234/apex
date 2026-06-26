@@ -1,0 +1,13 @@
+[package]
+name = "apex-import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+apex-workspace = { path = "../apex-workspace" }
+
+[lints]
+workspace = true

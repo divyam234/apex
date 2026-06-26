@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.apexapi.local/request/v1",
+  "title": "ApexAPI HTTP request logical model v1",
+  "$defs": {
+    "sensitivity": {
+      "enum": [
+        "public",
+        "sensitive",
+        "secret"
+      ]
+    },
+    "field": {
+      "type": "object",
+      "required": [
+        "name",
+        "value",
+        "enabled",
+        "sensitivity"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        }
+      },
+      "additionalProperties": true
+    },
+    "multipartField": {
+      "type": "object",
+      "required": [
+        "name",
+        "value_kind",
+        "enabled",
+        "sensitivity"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value_kind": {
+          "enum": [
+            "text",
+            "file"
+          ]
+        },
+        "value": {
+          "type": "string"
+        },
+        "relative_path": {
+          "type": "string"
+        },
+        "content_type": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        }
+      },
+      "additionalProperties": true
+    },
+    "auth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "none"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "username",
+            "password"
+          ],
+          "properties": {
+            "kind": {
+              "const": "basic"
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string",
+              "pattern": ".*\\{\\{.+\\}\\}.*"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "token"
+          ],
+          "properties": {
+            "kind": {
+              "const": "bearer"
+            },
+            "token": {
+              "type": "string",
+              "pattern": ".*\\{\\{.+\\}\\}.*"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "value",
+            "placement"
+          ],
+          "properties": {
+            "kind": {
+              "const": "api_key"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "value": {
+              "type": "string",
+              "pattern": ".*\\{\\{.+\\}\\}.*"
+            },
+            "placement": {
+              "enum": [
+                "header",
+                "query"
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "method",
+    "url",
+    "query",
+    "headers",
+    "body"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "method": {
+      "type": "string",
+      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+    },
+    "url": {
+      "type": "string"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "connection_timeout_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "idle_timeout_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "maximum_response_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "maximum_wire_response_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "redirect_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "follow_redirects": {
+      "type": "boolean"
+    },
+    "verify_certificates": {
+      "type": "boolean"
+    },
+    "cookie_jar": {
+      "type": "boolean"
+    },
+    "decompress_response": {
+      "type": "boolean"
+    },
+    "auth": {
+      "$ref": "#/$defs/auth"
+    },
+    "query": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/field"
+      }
+    },
+    "headers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/field"
+      }
+    },
+    "body": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "empty",
+            "text",
+            "json",
+            "xml",
+            "graphql",
+            "form_urlencoded",
+            "multipart",
+            "binary_file",
+            "stream_file"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/field"
+              },
+              {
+                "$ref": "#/$defs/multipartField"
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
