@@ -2,6 +2,7 @@
 
 pub mod session;
 mod workspace_monitor;
+use session::{CloseTabError, RequestTabState, ResourceIdentity, WorkspaceSession};
 
 use apex_domain::{
     Authentication, CancellationToken, ExecutionError, ExecutionEvent, HeaderEntry, HttpMethod,
@@ -1301,13 +1302,20 @@ impl DocumentStore {
     }
 
     fn open_draft() -> Result<(Self, Option<(HttpRequest, FileFingerprint)>), String> {
+        let id = StableId::parse("gui-draft").expect("static identifier is valid");
+        Self::open_draft_for(&id)
+    }
+
+    fn open_draft_for(
+        id: &StableId,
+    ) -> Result<(Self, Option<(HttpRequest, FileFingerprint)>), String> {
         let root = draft_state_root()?.join("apex-api").join("draft-workspace");
         let repository =
             WorkspaceRepository::new(root.clone()).map_err(|error| error.to_string())?;
         let path = root
             .join("collections")
             .join("local-drafts")
-            .join("gui-draft.request.toml");
+            .join(format!("{}.request.toml", id.as_str()));
         let loaded = if path.exists() {
             let loaded = repository
                 .load_request(&path)
@@ -1505,6 +1513,17 @@ struct RequestPanelInit {
     variable_error: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct OpenRequestDocument {
+    request: HttpRequest,
+    store: Option<DocumentStore>,
+    fingerprint: Option<FileFingerprint>,
+    document_error: Option<String>,
+    external_state: RequestExternalState,
+    selected_section: RequestSection,
+    dirty: bool,
+}
+
 struct RequestPanel {
     focus_handle: FocusHandle,
     url_state: Entity<InputState>,
@@ -1525,6 +1544,8 @@ struct RequestPanel {
     environment_label: String,
     variable_error: Option<String>,
     dirty: bool,
+    session: WorkspaceSession,
+    documents: HashMap<ResourceIdentity, OpenRequestDocument>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1538,6 +1559,7 @@ impl RequestPanel {
             environment_label,
             variable_error,
         } = init;
+        let is_workspace_document = initial_document.is_some();
         let (document_store, request, document_fingerprint, document_error) =
             if let Some((store, request, fingerprint)) = initial_document {
                 (Some(store), request, Some(fingerprint), None)
@@ -1574,6 +1596,34 @@ impl RequestPanel {
                 this.mark_dirty_from_editor(cx);
             }
         });
+        let initial_resource = if is_workspace_document {
+            ResourceIdentity::WorkspaceRequest(
+                document_store
+                    .as_ref()
+                    .map(|store| store.path().to_owned())
+                    .unwrap_or_default(),
+            )
+        } else {
+            ResourceIdentity::Draft(request.id.clone())
+        };
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            initial_resource.clone(),
+            request.name.clone(),
+        ));
+        let mut documents = HashMap::new();
+        documents.insert(
+            initial_resource,
+            OpenRequestDocument {
+                request: request.clone(),
+                store: document_store.clone(),
+                fingerprint: document_fingerprint,
+                document_error: document_error.clone(),
+                external_state: RequestExternalState::InSync,
+                selected_section: RequestSection::Params,
+                dirty: false,
+            },
+        );
         Self {
             focus_handle: cx.focus_handle(),
             url_state,
@@ -1594,12 +1644,123 @@ impl RequestPanel {
             environment_label,
             variable_error,
             dirty: false,
+            session,
+            documents,
             _subscriptions: vec![url_subscription, body_subscription],
+        }
+    }
+
+    fn active_resource(&self) -> Option<ResourceIdentity> {
+        self.session.active().map(|tab| tab.resource.clone())
+    }
+
+    fn snapshot_active(&mut self, cx: &App) {
+        let Some(resource) = self.active_resource() else {
+            return;
+        };
+        self.documents.insert(
+            resource,
+            OpenRequestDocument {
+                request: self.current_request(cx),
+                store: self.document_store.clone(),
+                fingerprint: self.document_fingerprint,
+                document_error: self.document_error.clone(),
+                external_state: self.external_state.clone(),
+                selected_section: self.selected_section,
+                dirty: self.dirty,
+            },
+        );
+    }
+
+    fn restore_document(
+        &mut self,
+        document: OpenRequestDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel(cx);
+        self.method = document.request.method.clone();
+        self.url_state.update(cx, |state, cx| {
+            state.set_value(&document.request.url, window, cx);
+        });
+        self.body_state.update(cx, |state, cx| {
+            state.set_value(editor_body(&document.request.body), window, cx);
+        });
+        self.base_request = document.request;
+        self.document_store = document.store;
+        self.document_fingerprint = document.fingerprint;
+        self.document_error = document.document_error;
+        self.external_state = document.external_state;
+        self.selected_section = document.selected_section;
+        self.dirty = document.dirty;
+        if let Some(index) = self.session.active_index() {
+            let _ = self.session.mark_dirty(index, self.dirty);
+        }
+        self.response_panel.update(cx, |panel, cx| {
+            panel.reset();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn activate_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.session.active_index() == Some(index) {
+            return Ok(());
+        }
+        self.snapshot_active(cx);
+        self.session
+            .activate(index)
+            .map_err(|error| error.to_string())?;
+        let resource = self
+            .active_resource()
+            .ok_or_else(|| "the selected request tab is unavailable".to_owned())?;
+        let document = self
+            .documents
+            .get(&resource)
+            .cloned()
+            .ok_or_else(|| "the selected request document is unavailable".to_owned())?;
+        self.restore_document(document, window, cx);
+        Ok(())
+    }
+
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.snapshot_active(cx);
+        let previous_active = self.active_resource();
+        match self.session.close(index) {
+            Ok(closed) => {
+                self.documents.remove(&closed.resource);
+                let next_active = self.active_resource();
+                if next_active != previous_active
+                    && let Some(resource) = next_active
+                    && let Some(document) = self.documents.get(&resource).cloned()
+                {
+                    self.restore_document(document, window, cx);
+                }
+            }
+            Err(CloseTabError::UnsavedChanges { title, .. }) => {
+                window.push_notification(
+                    Notification::error(format!(
+                        "Save or discard changes in '{title}' before closing the tab"
+                    )),
+                    cx,
+                );
+            }
+            Err(error) => {
+                window.push_notification(Notification::error(error.to_string()), cx);
+            }
         }
     }
 
     fn mark_dirty_from_editor(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
+        if let Some(index) = self.session.active_index() {
+            let _ = self.session.mark_dirty(index, true);
+        }
         if let RequestExternalState::ReloadAvailable(pending) = self.external_state.clone() {
             self.external_state = RequestExternalState::Conflict(pending);
         }
@@ -1794,6 +1955,10 @@ impl RequestPanel {
         self.external_state = RequestExternalState::InSync;
         self.selected_section = RequestSection::Params;
         self.dirty = false;
+        if let Some(index) = self.session.active_index() {
+            let _ = self.session.mark_dirty(index, false);
+        }
+        self.snapshot_active(cx);
         self.response_panel.update(cx, |panel, cx| {
             panel.reset();
             cx.notify();
@@ -1807,13 +1972,30 @@ impl RequestPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.dirty {
-            return Err(
-                "save or discard the current request before opening another file".to_owned(),
-            );
+        self.snapshot_active(cx);
+        let resource = ResourceIdentity::WorkspaceRequest(store.path().to_owned());
+        if let Some(index) = self
+            .session
+            .tabs()
+            .iter()
+            .position(|tab| tab.resource == resource)
+        {
+            return self.activate_tab(index, window, cx);
         }
         let (request, fingerprint) = store.load()?;
-        self.apply_request(request, store, fingerprint, window, cx);
+        let title = request.name.clone();
+        let document = OpenRequestDocument {
+            request: request.clone(),
+            store: Some(store),
+            fingerprint: Some(fingerprint),
+            document_error: None,
+            external_state: RequestExternalState::InSync,
+            selected_section: RequestSection::Params,
+            dirty: false,
+        };
+        self.documents.insert(resource.clone(), document.clone());
+        self.session.open(RequestTabState::saved(resource, title));
+        self.restore_document(document, window, cx);
         Ok(())
     }
 
@@ -1834,41 +2016,65 @@ impl RequestPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.dirty {
-            return Err(
-                "save or discard the current request before restoring a history entry".to_owned(),
-            );
-        }
-        self.cancel(cx);
-        let (store, loaded) = DocumentStore::open_draft()?;
+        self.snapshot_active(cx);
         let request = document.request;
-        self.method = request.method.clone();
-        self.url_state
-            .update(cx, |state, cx| state.set_value(&request.url, window, cx));
-        self.body_state.update(cx, |state, cx| {
-            state.set_value(editor_body(&request.body), window, cx);
-        });
-        self.base_request = request;
-        self.document_store = Some(store);
-        self.document_fingerprint = loaded.map(|(_, fingerprint)| fingerprint);
-        self.document_error = None;
-        self.external_generation = self.external_generation.wrapping_add(1);
-        self.external_state = RequestExternalState::InSync;
-        self.selected_section = RequestSection::Params;
-        self.dirty = true;
-        self.response_panel.update(cx, |panel, cx| {
-            panel.reset();
-            cx.notify();
-        });
-        cx.notify();
+        let resource = ResourceIdentity::Draft(request.id.clone());
+        let (store, loaded) = DocumentStore::open_draft_for(&request.id)?;
+        if let Some(index) = self
+            .session
+            .tabs()
+            .iter()
+            .position(|tab| tab.resource == resource)
+            && self.session.tabs()[index].dirty
+        {
+            return self.activate_tab(index, window, cx);
+        }
+        let restored = OpenRequestDocument {
+            request: request.clone(),
+            store: Some(store),
+            fingerprint: loaded.map(|(_, fingerprint)| fingerprint),
+            document_error: None,
+            external_state: RequestExternalState::InSync,
+            selected_section: RequestSection::Params,
+            dirty: true,
+        };
+        self.documents.insert(resource.clone(), restored.clone());
+        if let Some(index) = self
+            .session
+            .tabs()
+            .iter()
+            .position(|tab| tab.resource == resource)
+        {
+            self.session
+                .activate(index)
+                .map_err(|error| error.to_string())?;
+            self.session
+                .mark_dirty(index, true)
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.session.open(RequestTabState::draft(
+                request.id.clone(),
+                format!("{} (history)", request.name),
+            ));
+        }
+        self.restore_document(restored, window, cx);
         Ok(())
     }
 
     fn new_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel(cx);
+        self.snapshot_active(cx);
         let request = default_request();
-        let draft_store = DocumentStore::open_draft();
-        let (store, fingerprint, store_error) = match draft_store {
+        let resource = ResourceIdentity::Draft(request.id.clone());
+        if let Some(index) = self
+            .session
+            .tabs()
+            .iter()
+            .position(|tab| tab.resource == resource)
+        {
+            let _ = self.activate_tab(index, window, cx);
+            return;
+        }
+        let (store, fingerprint, store_error) = match DocumentStore::open_draft() {
             Ok((store, loaded)) => (
                 Some(store),
                 loaded.map(|(_, fingerprint)| fingerprint),
@@ -1876,24 +2082,21 @@ impl RequestPanel {
             ),
             Err(error) => (None, None, Some(error)),
         };
-        self.method = request.method.clone();
-        self.url_state
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.body_state
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.base_request = request;
-        self.document_store = store;
-        self.document_fingerprint = fingerprint;
-        self.document_error = store_error;
-        self.external_generation = self.external_generation.wrapping_add(1);
-        self.external_state = RequestExternalState::InSync;
-        self.selected_section = RequestSection::Params;
-        self.dirty = true;
-        self.response_panel.update(cx, |panel, cx| {
-            panel.reset();
-            cx.notify();
-        });
-        cx.notify();
+        let document = OpenRequestDocument {
+            request: request.clone(),
+            store,
+            fingerprint,
+            document_error: store_error,
+            external_state: RequestExternalState::InSync,
+            selected_section: RequestSection::Params,
+            dirty: true,
+        };
+        self.documents.insert(resource.clone(), document.clone());
+        self.session.open(RequestTabState::draft(
+            request.id.clone(),
+            request.name.clone(),
+        ));
+        self.restore_document(document, window, cx);
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) -> Result<PathBuf, String> {
@@ -1909,10 +2112,14 @@ impl RequestPanel {
             .as_ref()
             .ok_or_else(|| "document store is unavailable".to_owned())?;
         let fingerprint = store.save(&request, self.document_fingerprint)?;
+        let path = store.path().to_owned();
         self.document_fingerprint = Some(fingerprint);
         self.base_request = request;
         self.dirty = false;
-        let path = store.path().to_owned();
+        if let Some(index) = self.session.active_index() {
+            let _ = self.session.mark_dirty(index, false);
+        }
+        self.snapshot_active(cx);
         cx.notify();
         Ok(path)
     }
@@ -2185,9 +2392,47 @@ impl Render for RequestPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let running = self.is_running();
         let external_banner = self.external_banner(cx);
+        let active_tab = self.session.active_index();
+        let tab_count = self.session.tabs().len();
+        let tabs = self.session.tabs().to_vec();
+        let tab_strip = h_flex()
+            .w_full()
+            .gap_1()
+            .children(tabs.into_iter().enumerate().map(|(index, tab)| {
+                let label = format!(
+                    "{}{}{}",
+                    if tab.pinned { "📌 " } else { "" },
+                    tab.title,
+                    if tab.dirty { " •" } else { "" }
+                );
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new(("request-document-tab", index))
+                            .label(label)
+                            .when(active_tab == Some(index), |button| button.primary())
+                            .when(active_tab != Some(index), |button| button.ghost())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Err(error) = this.activate_tab(index, window, cx) {
+                                    window.push_notification(Notification::error(error), cx);
+                                }
+                            })),
+                    )
+                    .when(tab_count > 1, |row| {
+                        row.child(
+                            Button::new(("close-request-document-tab", index))
+                                .label("×")
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.close_tab(index, window, cx);
+                                })),
+                        )
+                    })
+            }));
         gpui_component::v_flex()
             .size_full()
             .gap_2()
+            .child(tab_strip)
             .child(
                 h_flex()
                     .gap_2()

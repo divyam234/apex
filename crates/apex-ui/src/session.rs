@@ -193,11 +193,16 @@ impl WorkspaceSession {
         if index >= self.tabs.len() {
             return Err(CloseTabError::InvalidIndex(index));
         }
+        let active_resource = self.active().map(|tab| tab.resource.clone());
         let removed = self.tabs.remove(index);
         self.remember_closed(removed.clone());
-        self.active_index = match self.tabs.len() {
-            0 => None,
-            len => Some(index.min(len - 1)),
+        self.active_index = if self.tabs.is_empty() {
+            None
+        } else if active_resource.as_ref() == Some(&removed.resource) {
+            Some(index.min(self.tabs.len() - 1))
+        } else {
+            active_resource
+                .and_then(|resource| self.tabs.iter().position(|tab| tab.resource == resource))
         };
         Ok(removed)
     }
@@ -357,6 +362,50 @@ mod tests {
         let index = session.reopen_closed().expect("reopens");
         assert_eq!(index, 0);
         assert_eq!(session.tabs()[0].resource, resource);
+    }
+
+    #[test]
+    fn closing_inactive_tab_preserves_active_resource() {
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("a")),
+            "A",
+        ));
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("b")),
+            "B",
+        ));
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("c")),
+            "C",
+        ));
+        session.activate(1).expect("activates B");
+
+        session.close(0).expect("closes inactive A");
+
+        assert_eq!(session.active().map(|tab| tab.title.as_str()), Some("B"));
+    }
+
+    #[test]
+    fn closing_active_tab_selects_nearest_remaining_tab() {
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("a")),
+            "A",
+        ));
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("b")),
+            "B",
+        ));
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("c")),
+            "C",
+        ));
+        session.activate(1).expect("activates B");
+
+        session.close(1).expect("closes active B");
+
+        assert_eq!(session.active().map(|tab| tab.title.as_str()), Some("C"));
     }
 
     #[test]

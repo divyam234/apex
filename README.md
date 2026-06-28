@@ -31,7 +31,7 @@ The GPUI application includes:
 - background HTTP execution and filesystem monitoring outside the render thread;
 - clean-document reload prompts and dirty-document conflict protection.
 
-The underlying tab/session model supports preview tabs, pinning, reordering, close guards, reopen-closed behavior, and stable resource identity. Full multi-document visual wiring and real-desktop visual polish remain ongoing UI work.
+The request editor includes visual multi-document tabs with resource-aware activation, dirty-state indicators, guarded closing, and separate history draft tabs. Pinning, drag reordering, reopen-closed controls, and real-desktop visual polish remain ongoing UI work.
 
 ### CLI and automation
 

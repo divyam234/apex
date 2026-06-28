@@ -13,7 +13,7 @@ Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Expe
 | GUI/CLI same engine | Partial overlap | Related desktop/CLI | CLI/self-host tooling | Inso CLI | Bru CLI | **Implemented for HTTP Send/Cancel** |
 | Dockable desktop shell | Desktop panels | Desktop panels | Web layout | Desktop panels | Desktop panels | **Implemented foundation** with GPUI Dock |
 | Workspace collection tree | Supported | Supported | Supported | Supported | Supported | **Implemented foundation**, including nested file indexing |
-| Multi-document tab lifecycle | Supported | Supported | Supported | Supported | Supported | **Tested model**; full visual strip pending |
+| Multi-document tab lifecycle | Supported | Supported | Supported | Supported | Supported | **Implemented foundation**: visual open/activate/close with dirty guards; advanced actions pending |
 | Ordered duplicate query/headers | Format-dependent | Supported | Supported | Supported | Supported | **Implemented and round-trip tested** |
 | Deterministic variable trace | Environments | Variables | Variables | Environments | Variables | **Implemented** across ten scopes and complete request fields |
 | Durable environment selection | Supported | Supported | Supported | Supported | Supported | **Implemented foundation** in GUI/CLI with default and ignored local override |
@@ -52,7 +52,7 @@ Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Expe
 | Privacy-governed history snapshots | Implemented Phase 4G | Default-off bounded request/response snapshots, v1→v2 migration, redacted headers, filtered queries |
 | History restore/resend | Implemented Phase 4G | CLI restore and native draft restore; resend uses shared request execution path |
 | Semantic response diff | Implemented Phase 4G | Status, timing, size, duplicate headers, cookies, JSON, text, binary; bounded and deterministic |
-| Tab lifecycle | Tested model | Preview/pin/reorder/close/reopen; visual multi-tab wiring pending |
+| Tab lifecycle | Implemented foundation | Visual open/activate/close, dirty guards, active-resource preservation, history draft tabs; pin/reorder/reopen UI pending |
 | HTTP adapter | Implemented Phase 2B | `crates/apex-http`, 23 real-network tests |
 | CLI send | Implemented | Same adapter/resolver, environment selection, Ctrl+C, JSON/human/quiet, downloads, optional history |
 | Workspace/environment variables | Implemented Phase 4E foundation | Atomic CRUD/default handling, local override lifecycle, source inspection, redacted CLI administration |

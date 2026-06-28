@@ -22,7 +22,7 @@ window level.
 - `DockArea` with collection, request, response, and inspector panels;
 - GPUI Component editor/input state for URL and body text;
 - virtualized `TreeState` collection navigation;
-- request and response tab bars;
+- visual multi-document request tabs and response tab bars;
 - command palette dialog and stable command IDs;
 - keyboard bindings for New, Send, Save, Focus URL, command palette, and Cancel;
 - notifications and a bottom status bar.
@@ -38,10 +38,12 @@ them by collection/folder, and open them from the tree. A loaded request retains
 currently have a structured editor. Atomic saves use the workspace repository and its loaded-file
 fingerprint; a changed file is rejected rather than overwritten.
 
-New unsaved requests use the application-state draft workspace. The current checkpoint has one
-visible request editor; the pure tab/session model already covers resource identity, preview tabs,
-pinning, reorder, close-other/right, unsaved-change guards, and reopen-closed behavior, but the
-multi-document visual tab strip is not yet wired to that model.
+New unsaved requests use the application-state draft workspace. The request surface now wires the
+resource-aware session model into a visual multi-document tab strip. Opening a workspace request
+creates or activates its tab, switching tabs restores editor and conflict state, saved tabs can be
+closed, dirty tabs are guarded, and history restores open as separate draft tabs. Preview, pin,
+reorder, close-other/right, and reopen-closed behavior remain model-level capabilities that are not
+yet exposed as complete native interactions.
 
 ## Validation boundary
 
