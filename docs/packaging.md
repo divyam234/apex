@@ -1,10 +1,5 @@
-# Packaging status
+# Packaging
 
-Packaging is not release-ready in Phase 1. The Nix flake provides a development/build foundation
-for the offline core only. Arch, Debian, RPM, AppImage, macOS, and Windows directories contain
-planned integration notes rather than pretend installers.
+The repository includes maintainable metadata for Arch (`PKGBUILD`), Debian (`control` and `rules`), RPM (`.spec`), Nix (`flake.nix`), and AppImage launcher/desktop files. `scripts/validate-release-metadata.sh` checks that required files and binary identities agree with Cargo manifests.
 
-Final Linux packages must install the native binary, desktop entry, AppStream metadata, icons, MIME
-association, shell completions, and license files. Package-manager installations defer update
-handling to their package manager. Native GPUI dependencies and Wayland/X11 smoke tests are release
-gates.
+The CI matrix builds the portable `apex` CLI on Linux, macOS, and Windows. Clean distribution-builder runs are still required before publishing each package. Desktop bundles additionally require native GPUI validation and platform signing/notarization; those external gates are tracked in `docs/release-checklist.md`.

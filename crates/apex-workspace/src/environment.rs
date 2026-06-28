@@ -7,8 +7,9 @@ use apex_domain::{StableId, ValueSensitivity, VariableDefinition, VariableValue}
 use apex_secrets::{SecretRef, SecretStoreChain};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAXIMUM_VARIABLE_SET_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -144,6 +145,13 @@ pub struct EnvironmentSummary {
     pub name: String,
     pub path: PathBuf,
     pub variable_count: usize,
+    pub has_local_override: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnvironmentDeletionReceipt {
+    pub id: StableId,
+    pub cleanup_pending: Option<PathBuf>,
 }
 
 impl WorkspaceRepository {
@@ -162,6 +170,170 @@ impl WorkspaceRepository {
             .join(".apex")
             .join("environments")
             .join(format!("{}.local.toml", id.as_str()))
+    }
+
+    pub fn create_environment(
+        &self,
+        document: &VariableSetDocument,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        validate_variable_set_identity(document)?;
+        self.save_variable_set(&self.environment_path(&document.id), document, None)
+    }
+
+    pub fn update_environment(
+        &self,
+        document: &VariableSetDocument,
+        expected: FileFingerprint,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        validate_variable_set_identity(document)?;
+        self.save_variable_set(
+            &self.environment_path(&document.id),
+            document,
+            Some(expected),
+        )
+    }
+
+    pub fn rename_environment(
+        &self,
+        id: &StableId,
+        name: impl Into<String>,
+        expected: FileFingerprint,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        let path = self.environment_path(id);
+        ensure_file_snapshot(&path, expected)?;
+        let loaded = self.load_environment(id)?;
+        let mut document = loaded.value;
+        document.name = name.into();
+        validate_variable_set_identity(&document)?;
+        self.save_variable_set(&loaded.path, &document, Some(expected))
+    }
+
+    pub fn save_local_environment_override(
+        &self,
+        environment_id: &StableId,
+        document: &VariableSetDocument,
+        expected: Option<FileFingerprint>,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        if &document.id != environment_id {
+            return Err(WorkspaceError::InvalidFormat(format!(
+                "local override id '{}' must match environment id '{}'",
+                document.id, environment_id
+            )));
+        }
+        self.load_environment(environment_id)?;
+        validate_variable_set_identity(document)?;
+        self.save_variable_set(
+            &self.local_environment_override_path(environment_id),
+            document,
+            expected,
+        )
+    }
+
+    pub fn delete_local_environment_override(
+        &self,
+        environment_id: &StableId,
+        expected: FileFingerprint,
+    ) -> Result<(), WorkspaceError> {
+        delete_file_checked(
+            &self.local_environment_override_path(environment_id),
+            expected,
+        )
+    }
+
+    pub fn set_default_environment(
+        &self,
+        environment_id: Option<&StableId>,
+        expected_manifest: FileFingerprint,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        if let Some(id) = environment_id {
+            self.load_environment(id)?;
+        }
+        let loaded = self.load_manifest()?;
+        if loaded.fingerprint != expected_manifest {
+            return Err(WorkspaceError::ExternalChange(loaded.path));
+        }
+        let mut manifest = loaded.value;
+        manifest.default_environment = environment_id.map(|id| id.as_str().to_owned());
+        self.save_manifest(&manifest, Some(expected_manifest))
+    }
+
+    pub fn delete_environment(
+        &self,
+        id: &StableId,
+        expected: FileFingerprint,
+    ) -> Result<EnvironmentDeletionReceipt, WorkspaceError> {
+        let manifest = self.load_manifest()?;
+        if manifest.value.default_environment.as_deref() == Some(id.as_str()) {
+            return Err(WorkspaceError::InvalidFormat(format!(
+                "environment '{id}' is the workspace default; select another default before deletion"
+            )));
+        }
+        let environment_path = self.environment_path(id);
+        ensure_file_snapshot(&environment_path, expected)?;
+        let environment = self.load_environment(id)?;
+        let local = self.load_local_environment_override(id)?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let trash = self
+            .root
+            .join(".apex")
+            .join("trash")
+            .join("environments")
+            .join(format!("{}-{nonce}", id.as_str()));
+        fs::create_dir_all(&trash)?;
+        let environment_trash = trash.join("environment.toml");
+        fs::rename(&environment.path, &environment_trash)?;
+        let local_trash = local.as_ref().map(|_| trash.join("local.toml"));
+        if let (Some(local), Some(local_trash)) = (&local, &local_trash)
+            && let Err(error) = fs::rename(&local.path, local_trash)
+        {
+            let restore = fs::rename(&environment_trash, &environment.path);
+            let _ = fs::remove_dir_all(&trash);
+            let _ = sync_parent(&environment.path);
+            return match restore {
+                Ok(()) => Err(WorkspaceError::Io(error)),
+                Err(restore_error) => Err(WorkspaceError::InvalidFormat(format!(
+                    "local override deletion failed ({error}) and environment rollback failed ({restore_error}); recover {}",
+                    trash.display()
+                ))),
+            };
+        }
+        let durability = (|| -> Result<(), WorkspaceError> {
+            sync_parent(&environment.path)?;
+            if let Some(local) = &local {
+                sync_parent(&local.path)?;
+            }
+            sync_directory(&trash)
+        })();
+        if let Err(error) = durability {
+            let local_restore = match (&local, &local_trash) {
+                (Some(local), Some(local_trash)) => fs::rename(local_trash, &local.path),
+                _ => Ok(()),
+            };
+            let environment_restore = fs::rename(&environment_trash, &environment.path);
+            let _ = fs::remove_dir_all(&trash);
+            let _ = sync_parent(&environment.path);
+            if let Some(local) = &local {
+                let _ = sync_parent(&local.path);
+            }
+            return match (local_restore, environment_restore) {
+                (Ok(()), Ok(())) => Err(error),
+                (local_result, environment_result) => Err(WorkspaceError::InvalidFormat(format!(
+                    "environment deletion durability failed ({error}); rollback results: local={local_result:?}, environment={environment_result:?}; recover {}",
+                    trash.display()
+                ))),
+            };
+        }
+        let cleanup_pending = match fs::remove_dir_all(&trash) {
+            Ok(()) => None,
+            Err(_) => Some(trash),
+        };
+        Ok(EnvironmentDeletionReceipt {
+            id: id.clone(),
+            cleanup_pending,
+        })
     }
 
     pub fn load_workspace_variables(
@@ -233,11 +405,15 @@ impl WorkspaceRepository {
                 continue;
             }
             let loaded = self.load_variable_set(&path)?;
+            let has_local_override = self
+                .local_environment_override_path(&loaded.value.id)
+                .exists();
             summaries.push(EnvironmentSummary {
                 id: loaded.value.id,
                 name: loaded.value.name,
                 path,
                 variable_count: loaded.value.variables.len(),
+                has_local_override,
             });
         }
         summaries.sort_by(|left, right| {
@@ -251,6 +427,7 @@ impl WorkspaceRepository {
 }
 
 pub fn format_variable_set(document: &VariableSetDocument) -> Result<String, WorkspaceError> {
+    validate_variable_set_identity(document)?;
     if document.schema_version != CURRENT_SCHEMA_VERSION {
         return Err(WorkspaceError::UnsupportedSchemaVersion {
             found: document.schema_version,
@@ -364,6 +541,7 @@ pub fn parse_variable_set(input: &str) -> Result<VariableSetDocument, WorkspaceE
     let id = StableId::parse(parse_string(required(&root, "id")?)?)
         .map_err(|error| WorkspaceError::InvalidFormat(error.to_string()))?;
     let name = parse_string(required(&root, "name")?)?;
+    validate_variable_set_name(&name)?;
     let unknown_fields = root
         .into_iter()
         .filter(|(key, _)| !matches!(key.as_str(), "schema_version" | "id" | "name"))
@@ -624,6 +802,79 @@ fn validate_process_environment_name(name: &str) -> Result<(), WorkspaceError> {
     }
 }
 
+fn validate_variable_set_identity(document: &VariableSetDocument) -> Result<(), WorkspaceError> {
+    validate_variable_set_name(&document.name)
+}
+
+fn validate_variable_set_name(name: &str) -> Result<(), WorkspaceError> {
+    if name.trim().is_empty() || name.chars().any(char::is_control) {
+        Err(WorkspaceError::InvalidFormat(
+            "environment names must be non-empty and contain no control characters".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_file_snapshot(path: &Path, expected: FileFingerprint) -> Result<(), WorkspaceError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkspaceError::ExternalChange(path.to_owned())
+        } else {
+            WorkspaceError::Io(error)
+        }
+    })?;
+    if FileFingerprint::from_bytes(&bytes) == expected {
+        Ok(())
+    } else {
+        Err(WorkspaceError::ExternalChange(path.to_owned()))
+    }
+}
+
+fn delete_file_checked(path: &Path, expected: FileFingerprint) -> Result<(), WorkspaceError> {
+    ensure_file_snapshot(path, expected)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| WorkspaceError::InvalidPath(path.display().to_string()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| WorkspaceError::InvalidPath(path.display().to_string()))?;
+    let tombstone = parent.join(format!(".{name}.delete.{nonce}.tmp"));
+    fs::rename(path, &tombstone)?;
+    sync_directory(parent)?;
+    if let Err(error) = fs::remove_file(&tombstone) {
+        let restore = fs::rename(&tombstone, path);
+        let _ = sync_directory(parent);
+        return match restore {
+            Ok(()) => Err(WorkspaceError::Io(error)),
+            Err(restore_error) => Err(WorkspaceError::InvalidFormat(format!(
+                "environment deletion failed ({error}) and rollback failed ({restore_error}); recover {}",
+                tombstone.display()
+            ))),
+        };
+    }
+    sync_directory(parent)
+}
+
+fn sync_parent(path: &Path) -> Result<(), WorkspaceError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| WorkspaceError::InvalidPath(path.display().to_string()))?;
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> Result<(), WorkspaceError> {
+    if let Ok(directory) = File::open(path) {
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
 fn strongest_sensitivity(left: ValueSensitivity, right: ValueSensitivity) -> ValueSensitivity {
     match (left, right) {
         (ValueSensitivity::Secret, _) | (_, ValueSensitivity::Secret) => ValueSensitivity::Secret,
@@ -713,6 +964,186 @@ secret_name = "token"
 "#;
         let error = parse_variable_set(input).expect_err("secret source must remain secret");
         assert!(matches!(error, WorkspaceError::InvalidFormat(_)));
+    }
+
+    fn temporary_repository(name: &str) -> (WorkspaceRepository, PathBuf) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "apex-environment-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        let repository = WorkspaceRepository::new(&root).expect("repository");
+        repository
+            .initialize(&crate::WorkspaceManifest::new(
+                StableId::parse("workspace").expect("workspace id"),
+                "Environment fixture",
+            ))
+            .expect("initialize");
+        (repository, root)
+    }
+
+    fn public_variable(name: &str, value: &str) -> StoredVariable {
+        StoredVariable {
+            name: name.to_owned(),
+            source: StoredVariableSource::Literal(VariableValue::String(value.to_owned())),
+            sensitivity: ValueSensitivity::Public,
+            enabled: true,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn environment_crud_and_local_override_are_listed_without_secret_values() {
+        let (repository, root) = temporary_repository("crud");
+        let id = StableId::parse("development").expect("id");
+        let mut environment = VariableSetDocument::new(id.clone(), "Development");
+        environment
+            .variables
+            .push(public_variable("host", "development.test"));
+        let fingerprint = repository
+            .create_environment(&environment)
+            .expect("create environment");
+        let fingerprint = repository
+            .rename_environment(&id, "Developer machine", fingerprint)
+            .expect("rename environment");
+        let mut local = VariableSetDocument::new(id.clone(), "Development local");
+        local.variables.push(public_variable("host", "127.0.0.1"));
+        repository
+            .save_local_environment_override(&id, &local, None)
+            .expect("local override");
+
+        let environments = repository.list_environments().expect("list environments");
+        assert_eq!(environments.len(), 1);
+        assert_eq!(environments[0].name, "Developer machine");
+        assert!(environments[0].has_local_override);
+        assert_eq!(
+            repository
+                .load_environment(&id)
+                .expect("updated environment")
+                .fingerprint,
+            fingerprint
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn stale_environment_update_is_rejected() {
+        let (repository, root) = temporary_repository("stale");
+        let id = StableId::parse("development").expect("id");
+        let document = VariableSetDocument::new(id.clone(), "Development");
+        let fingerprint = repository
+            .create_environment(&document)
+            .expect("create environment");
+        fs::write(repository.environment_path(&id), "external edit").expect("external edit");
+        assert!(matches!(
+            repository.rename_environment(&id, "Changed", fingerprint),
+            Err(WorkspaceError::ExternalChange(_))
+        ));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn local_override_id_must_match_environment() {
+        let (repository, root) = temporary_repository("override-id");
+        let id = StableId::parse("development").expect("id");
+        repository
+            .create_environment(&VariableSetDocument::new(id.clone(), "Development"))
+            .expect("create environment");
+        let wrong = VariableSetDocument::new(
+            StableId::parse("staging").expect("wrong id"),
+            "Wrong local override",
+        );
+        assert!(matches!(
+            repository.save_local_environment_override(&id, &wrong, None),
+            Err(WorkspaceError::InvalidFormat(_))
+        ));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn deleting_default_environment_requires_explicit_default_change() {
+        let (repository, root) = temporary_repository("default-delete");
+        let id = StableId::parse("development").expect("id");
+        let fingerprint = repository
+            .create_environment(&VariableSetDocument::new(id.clone(), "Development"))
+            .expect("create environment");
+        let manifest = repository.load_manifest().expect("manifest");
+        repository
+            .set_default_environment(Some(&id), manifest.fingerprint)
+            .expect("set default");
+        assert!(matches!(
+            repository.delete_environment(&id, fingerprint),
+            Err(WorkspaceError::InvalidFormat(_))
+        ));
+        assert!(repository.environment_path(&id).exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn deleting_environment_also_removes_ignored_local_override() {
+        let (repository, root) = temporary_repository("delete");
+        let id = StableId::parse("development").expect("id");
+        let fingerprint = repository
+            .create_environment(&VariableSetDocument::new(id.clone(), "Development"))
+            .expect("create environment");
+        repository
+            .save_local_environment_override(
+                &id,
+                &VariableSetDocument::new(id.clone(), "Development local"),
+                None,
+            )
+            .expect("local override");
+        let receipt = repository
+            .delete_environment(&id, fingerprint)
+            .expect("delete environment");
+        assert_eq!(receipt.id, id);
+        assert_eq!(receipt.cleanup_pending, None);
+        assert!(!repository.environment_path(&receipt.id).exists());
+        assert!(
+            !repository
+                .local_environment_override_path(&receipt.id)
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn local_override_delete_is_fingerprint_guarded() {
+        let (repository, root) = temporary_repository("override-delete");
+        let id = StableId::parse("development").expect("id");
+        repository
+            .create_environment(&VariableSetDocument::new(id.clone(), "Development"))
+            .expect("create environment");
+        let fingerprint = repository
+            .save_local_environment_override(
+                &id,
+                &VariableSetDocument::new(id.clone(), "Development local"),
+                None,
+            )
+            .expect("local override");
+        fs::write(
+            repository.local_environment_override_path(&id),
+            "external edit",
+        )
+        .expect("external edit");
+        assert!(matches!(
+            repository.delete_local_environment_override(&id, fingerprint),
+            Err(WorkspaceError::ExternalChange(_))
+        ));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn empty_environment_names_are_rejected() {
+        let mut document = variable_set();
+        document.name = "  ".to_owned();
+        assert!(matches!(
+            format_variable_set(&document),
+            Err(WorkspaceError::InvalidFormat(_))
+        ));
     }
 
     #[test]

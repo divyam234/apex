@@ -1,0 +1,15 @@
+[package]
+name = "apex-protocols"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10.9"
+
+[lints]
+workspace = true

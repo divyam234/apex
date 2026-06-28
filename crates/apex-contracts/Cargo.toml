@@ -1,0 +1,14 @@
+[package]
+name = "apex-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json.workspace = true
+serde_yaml = "0.9.34"
+
+[lints]
+workspace = true

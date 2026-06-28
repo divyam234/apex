@@ -36,17 +36,31 @@ focus/accessibility audit, and real desktop Wayland/X11 visual smoke tests.
 
 ## Phase 4 — workspace productivity
 
-Status: **Phase 4B implemented; broader productivity work remains**.
+Status: **Phase 4G history snapshots, restore/resend, and semantic response diff implemented; broader productivity work remains**.
 
 Delivered: workspace-path launch, manifest load, stable nested request index, collection-tree
 navigation, dirty-open guard, field-preserving request editing, atomic saves, resource-root
 propagation, tested resource-tab/session lifecycle, durable workspace/environment/local-override
 variable files, shared full-request resolution, environment selection in GUI and CLI, redacted
-environment inspection, and strict pre-send unresolved-variable failures.
+environment inspection, strict pre-send unresolved-variable failures, recursive workspace change
+observation with typed relative paths, bounded buffering, explicit rescan signals, and noise/path
+filtering, plus a dedicated monitor thread, live collection-tree refresh, fingerprint verification,
+clean reload prompts, dirty-document conflict preservation, rename/removal handling, visible
+watcher status, stable collection/folder metadata, explicit Git-friendly ordering, guarded
+create/rename/move/duplicate/archive/delete operations, duplicate identity re-keying, atomic
+environment CRUD/default handling, ignored local-override lifecycle, redacted effective-source
+inspection, real CLI environment administration, a bounded incremental SQLite search index under
+`.apex`, sensitive-value exclusion, exact/fuzzy field filters, strict Postman Collection v2.1 preview
+with unsupported-field diagnostics, redacted code generation for cURL, HTTPie, Rust reqwest, Python
+requests, and Go net/http, CLI search/import/codegen workflows, privacy-governed history schema v2,
+opt-in bounded request/response snapshots, filtered history queries, request restore, shared resend via
+the request editor, deterministic status/timing/header/cookie/JSON/text/binary comparison, CLI history
+restore/diff, and a native History dock panel with off-thread loading and latest-response comparison.
 
-Remaining: visual multi-document tab strip, folders/collection editing, inheritance inspector UI,
-variable autocomplete/hover/go-to-definition, keyring/vault, filesystem watcher, broad import/export,
-code generation, indexed global search, history UI, and semantic response diff.
+Remaining: native collection/folder mutation dialogs and drag-and-drop wiring, visual multi-document
+tab strip, inheritance inspector UI, variable autocomplete/hover/go-to-definition, OS
+keyring/encrypted vault, polling fallback for unreliable filesystems, additional importer/exporter
+formats, and native search/import/codegen panels.
 
 ## Phase 5 — automation
 
@@ -72,3 +86,7 @@ plugins, and the optional provider-independent AI boundary.
 
 Status: **planned**. Accessibility, benchmarks, profiling, fuzzing, security suite, packaging,
 migrations, documentation, and release checklist.
+
+## Completion record — 2026-06-26
+
+Phases 5 through 9 have implemented and validated their shared-library and portable-CLI foundations. Packaging metadata and cross-platform CLI CI are prepared. Desktop signing, notarization, native GPUI smoke testing, assistive-technology auditing, clean-distribution package builds, and long-duration fuzzing remain release-environment gates documented in `docs/release-checklist.md`; they are not represented as completed in-product capabilities.

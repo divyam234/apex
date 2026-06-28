@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 apex-domain = { path = "../../crates/apex-domain" }
+apex-export = { path = "../../crates/apex-export" }
 apex-import = { path = "../../crates/apex-import" }
 apex-http = { path = "../../crates/apex-http" }
 apex-history = { path = "../../crates/apex-history" }

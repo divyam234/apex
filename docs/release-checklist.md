@@ -1,23 +1,22 @@
 # Release checklist
 
-## Current checkpoint gate
+## Required automated gates
 
 - [x] `cargo fmt --all -- --check`
 - [x] `cargo check --workspace --all-targets`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo test --workspace`
-- [x] Native GPUI application compiles and links
-- [x] GUI Send/Cancel calls the shared HTTP adapter off the render thread
-- [x] Honest feature matrix updated
-- [x] Architecture/security/file-format decisions documented
-- [x] Source checkpoint excludes `target/`, local toolchains, Cargo credentials, and local state
-- [ ] Visual Wayland/X11 smoke on a host with a supported GPU
-- [ ] Upstream full gallery run from a source checkout that includes the story crate
+- [x] Core tests excluding native GPUI link-only targets
+- [x] Security regression and deterministic fuzz-smoke suite
+- [x] Release metadata validation and `git diff --check`
+- [x] Portable CLI release build contract for Linux, macOS, and Windows CI
 
-## ApexAPI 1.0 gate
+## Required human/release-environment gates
 
-The complete acceptance criteria remain those in the product brief. The current shell is not a 1.0
-claim. Multi-document UI, complete request editors, environments, secure OS keyring/vault,
-proxy/custom-TLS controls, scripts/assertions, collection runner, streaming protocols, OpenAPI,
-imports, response diff, mocks, trust restrictions, Git workflows, plugins, accessibility,
-benchmarks, and Linux packaging must all be implemented and verified first.
+- [ ] Native GPUI smoke test on a supported Linux desktop with XCB/XKB development/runtime libraries
+- [ ] Assistive-technology audit with a screen reader and keyboard-only workflow
+- [ ] Signed/notarized macOS application after an Apple signing identity is available
+- [ ] Signed Windows installer after a publisher certificate is available
+- [ ] Distribution package builds in clean Arch, Debian, RPM, Nix, and AppImage builder images
+- [ ] Long-running libFuzzer campaigns and dependency audit reviewed for the release commit
+
+A release candidate must not be described as a signed desktop release until the unchecked platform-specific gates are completed. The portable CLI and core libraries can be released independently after their automated gates pass.

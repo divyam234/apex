@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 apex-domain = { path = "../apex-domain" }
 apex-secrets = { path = "../apex-secrets" }
+notify.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
 
 [lints]

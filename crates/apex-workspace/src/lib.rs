@@ -1,7 +1,15 @@
 #![forbid(unsafe_code)]
 
+mod collection;
+pub use collection::*;
 mod environment;
 pub use environment::*;
+mod reconcile;
+pub use reconcile::*;
+mod search;
+pub use search::*;
+mod watch;
+pub use watch::*;
 
 use apex_domain::{
     ApiKeyPlacement, Authentication, FormField, HeaderEntry, HttpMethod, HttpRequest,
@@ -72,6 +80,10 @@ impl FileFingerprint {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut hasher);
         Self(hasher.finish())
+    }
+
+    pub fn to_hex(self) -> String {
+        format!("{:016x}", self.0)
     }
 }
 
@@ -223,7 +235,7 @@ impl WorkspaceRepository {
             return Ok(Vec::new());
         }
         let mut requests = Vec::new();
-        for path in walk_files(&collections_root)? {
+        for path in self.list_request_files_ordered()? {
             let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
@@ -264,7 +276,6 @@ impl WorkspaceRepository {
                 url: loaded.value.request.url,
             });
         }
-        requests.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(requests)
     }
 
@@ -1283,6 +1294,7 @@ pub enum WorkspaceError {
     InvalidFormat(String),
     InvalidPath(String),
     PathTraversal(String),
+    SymbolicLink(PathBuf),
     AlreadyExists(PathBuf),
     ExternalChange(PathBuf),
     MergeConflict {
@@ -1314,9 +1326,14 @@ impl Display for WorkspaceError {
             Self::PathTraversal(detail) => {
                 write!(formatter, "workspace path traversal rejected: {detail}")
             }
+            Self::SymbolicLink(path) => write!(
+                formatter,
+                "symbolic links are not allowed in workspace mutations: {}",
+                path.display()
+            ),
             Self::AlreadyExists(path) => write!(
                 formatter,
-                "refusing to overwrite existing file: {}",
+                "refusing to overwrite existing workspace resource: {}",
                 path.display()
             ),
             Self::ExternalChange(path) => write!(

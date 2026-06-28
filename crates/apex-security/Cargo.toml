@@ -1,0 +1,16 @@
+[package]
+name = "apex-security"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-contracts = { path = "../apex-contracts" }
+apex-plugins = { path = "../apex-plugins" }
+apex-scripting = { path = "../apex-scripting" }
+apex-domain = { path = "../apex-domain" }
+flate2 = "1.1.5"
+
+[lints]
+workspace = true

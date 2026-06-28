@@ -103,6 +103,10 @@ impl VariableContext {
             .next_back()
     }
 
+    pub fn iter_layers(&self) -> impl Iterator<Item = (VariableScope, &VariableLayer)> {
+        self.layers.iter().map(|(scope, layer)| (*scope, layer))
+    }
+
     pub fn merge(&mut self, other: Self) {
         for (scope, layer) in other.layers {
             self.layers

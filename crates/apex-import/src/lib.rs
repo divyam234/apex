@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod postman;
+pub use postman::*;
+
 use apex_domain::{HeaderEntry, HttpMethod, HttpRequest, RequestBody, RequestSettings, StableId};
 use apex_workspace::RequestDocument;
 use std::fmt::{Display, Formatter};
@@ -118,7 +121,8 @@ pub fn parse_curl(command: &str) -> Result<ImportPreview, ImportError> {
                     message: "Basic-auth credentials were not copied into the request file. Create a secret reference during import confirmation.".to_owned(),
                     source_path: None,
                 });
-                unsupported_fields.push(format!("credential:{value}"));
+                let _ = value;
+                unsupported_fields.push("credential:basic-auth".to_owned());
             }
             "--compressed" | "--location" | "-L" | "--silent" | "-s" | "--show-error" => {
                 diagnostics.push(ImportDiagnostic {
@@ -262,6 +266,19 @@ pub enum ImportError {
     MissingOptionValue(String),
     InvalidHeader(String),
     InvalidMethod(String),
+    InvalidJson(String),
+    InvalidPostmanCollection(String),
+    UnsupportedPostmanSchema(String),
+    InputTooLarge {
+        maximum_bytes: usize,
+        observed_bytes: usize,
+    },
+    ItemLimit {
+        maximum_items: usize,
+    },
+    NestingLimit {
+        maximum_depth: usize,
+    },
     TrailingEscape,
     UnclosedQuote(char),
 }
@@ -277,7 +294,29 @@ impl Display for ImportError {
                 write!(formatter, "cURL option {option} requires a value")
             }
             Self::InvalidHeader(value) => write!(formatter, "invalid cURL header: {value}"),
-            Self::InvalidMethod(value) => write!(formatter, "invalid cURL method: {value}"),
+            Self::InvalidMethod(value) => write!(formatter, "invalid imported method: {value}"),
+            Self::InvalidJson(detail) => write!(formatter, "invalid JSON import: {detail}"),
+            Self::InvalidPostmanCollection(detail) => {
+                write!(formatter, "invalid Postman collection: {detail}")
+            }
+            Self::UnsupportedPostmanSchema(schema) => {
+                write!(formatter, "unsupported Postman collection schema: {schema}")
+            }
+            Self::InputTooLarge {
+                maximum_bytes,
+                observed_bytes,
+            } => write!(
+                formatter,
+                "import input is {observed_bytes} bytes; maximum is {maximum_bytes} bytes"
+            ),
+            Self::ItemLimit { maximum_items } => write!(
+                formatter,
+                "Postman collection exceeds the maximum of {maximum_items} items"
+            ),
+            Self::NestingLimit { maximum_depth } => write!(
+                formatter,
+                "Postman collection exceeds the maximum nesting depth of {maximum_depth}"
+            ),
             Self::TrailingEscape => {
                 formatter.write_str("cURL command ends with an escape character")
             }
@@ -313,7 +352,8 @@ mod tests {
     fn does_not_copy_basic_auth_credentials() {
         let preview =
             parse_curl("curl -u 'admin:secret' https://api.test").expect("imports with diagnostic");
-        assert_eq!(preview.unsupported_fields, ["credential:admin:secret"]);
+        assert_eq!(preview.unsupported_fields, ["credential:basic-auth"]);
+        assert!(!format!("{preview:?}").contains("admin:secret"));
         assert!(
             preview
                 .diagnostics

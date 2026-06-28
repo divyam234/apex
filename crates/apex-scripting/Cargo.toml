@@ -1,0 +1,15 @@
+[package]
+name = "apex-scripting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+rhai = { version = "1.22.2", default-features = false, features = ["sync"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

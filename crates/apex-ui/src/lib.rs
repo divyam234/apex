@@ -1,10 +1,15 @@
 #![forbid(unsafe_code)]
 
 pub mod session;
+mod workspace_monitor;
 
 use apex_domain::{
     Authentication, CancellationToken, ExecutionError, ExecutionEvent, HeaderEntry, HttpMethod,
     HttpRequest, RequestBody, RequestSettings, StableId,
+};
+use apex_history::{
+    BodyDifference, HistoryDatabase, HistoryEntry, HistoryQuery, SemanticDiffPolicy,
+    semantic_response_diff,
 };
 use apex_http::HttpAdapter;
 use apex_runner::{
@@ -17,8 +22,9 @@ use apex_variables::{
     load_workspace_variables, resolve_http_request,
 };
 use apex_workspace::{
-    EnvironmentSummary, FileFingerprint, RequestDocument, WorkspaceRepository,
-    WorkspaceRequestEntry,
+    DocumentReconcileAction, EnvironmentSummary, ExternalChangeReason, FileFingerprint,
+    RequestDocument, WorkspaceChange, WorkspaceRepository, WorkspaceRequestEntry,
+    reconcile_workspace_change,
 };
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
@@ -40,8 +46,9 @@ use gpui_component::{
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
+use workspace_monitor::{WorkspaceMonitorMessage, start_workspace_monitor};
 
 actions!(
     apex,
@@ -284,12 +291,15 @@ impl WorkspaceBrowser {
 
 pub struct ApexShell {
     dock_area: Entity<DockArea>,
+    collections_panel: Entity<CollectionsPanel>,
+    _history_panel: Entity<HistoryPanel>,
     request_panel: Entity<RequestPanel>,
     workspace_label: String,
     repository: Option<WorkspaceRepository>,
     environments: Vec<EnvironmentSummary>,
     selected_environment: Option<String>,
     environment_label: String,
+    workspace_watch_status: String,
 }
 
 impl ApexShell {
@@ -339,6 +349,14 @@ impl ApexShell {
         });
         let collections_panel =
             cx.new(|cx| CollectionsPanel::new(request_panel.clone(), browser.clone(), window, cx));
+        let history_panel = cx.new(|cx| {
+            HistoryPanel::new(
+                request_panel.clone(),
+                browser.repository.as_ref(),
+                window,
+                cx,
+            )
+        });
         let inspector_panel = cx.new(InspectorPanel::new);
         let dock_area = cx.new(|cx| {
             DockArea::new("apex-main-dock", Some(1), window, cx).panel_style(PanelStyle::TabBar)
@@ -346,7 +364,15 @@ impl ApexShell {
         let dock_weak = dock_area.downgrade();
 
         let center = DockItem::tab(request_panel.clone(), &dock_weak, window, cx);
-        let left = DockItem::tab(collections_panel, &dock_weak, window, cx);
+        let left = DockItem::tabs(
+            vec![
+                Arc::new(collections_panel.clone()),
+                Arc::new(history_panel.clone()),
+            ],
+            &dock_weak,
+            window,
+            cx,
+        );
         let right = DockItem::tab(inspector_panel, &dock_weak, window, cx);
         let bottom = DockItem::tab(response_panel, &dock_weak, window, cx);
 
@@ -357,15 +383,65 @@ impl ApexShell {
             dock.set_bottom_dock(bottom, Some(px(300.)), true, window, cx);
         });
 
+        let (workspace_watch_status, monitor_receiver) = match browser.repository.clone() {
+            Some(repository) => match start_workspace_monitor(repository) {
+                Ok(receiver) => ("watching".to_owned(), Some(receiver)),
+                Err(error) => (format!("watch error: {error}"), None),
+            },
+            None => ("not active".to_owned(), None),
+        };
+        if let Some(receiver) = monitor_receiver {
+            cx.spawn(async move |this, cx| {
+                while let Ok(message) = receiver.recv().await {
+                    let Some(this) = this.upgrade() else {
+                        break;
+                    };
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.apply_workspace_monitor_message(message, cx);
+                    });
+                }
+            })
+            .detach();
+        }
+
         Self {
             dock_area,
+            collections_panel,
+            _history_panel: history_panel,
             request_panel,
             workspace_label: browser.label,
             repository: browser.repository,
             environments: browser.environments,
             selected_environment,
             environment_label,
+            workspace_watch_status,
         }
+    }
+
+    fn apply_workspace_monitor_message(
+        &mut self,
+        message: WorkspaceMonitorMessage,
+        cx: &mut Context<Self>,
+    ) {
+        match message {
+            WorkspaceMonitorMessage::Update { change, requests } => {
+                self.workspace_watch_status = "watching".to_owned();
+                if let Some(requests) = requests {
+                    self.collections_panel.update(cx, |panel, cx| {
+                        panel.apply_request_index(requests, cx);
+                    });
+                }
+                if let Some(repository) = self.repository.clone() {
+                    self.request_panel.update(cx, |panel, cx| {
+                        panel.observe_workspace_change(repository, &change, cx);
+                    });
+                }
+            }
+            WorkspaceMonitorMessage::Failed(error) => {
+                self.workspace_watch_status = format!("watch error: {error}");
+            }
+        }
+        cx.notify();
     }
 
     fn send_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -510,6 +586,7 @@ impl Render for ApexShell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let running = self.request_panel.read(cx).is_running();
         let dirty = self.request_panel.read(cx).dirty;
+        let external_attention = self.request_panel.read(cx).has_external_attention();
         gpui_component::v_flex()
             .id("apex-shell")
             .key_context(APP_CONTEXT)
@@ -569,6 +646,8 @@ impl Render for ApexShell {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(if running {
                                     "Request running"
+                                } else if external_attention {
+                                    "External workspace change"
                                 } else if dirty {
                                     "Unsaved draft"
                                 } else {
@@ -600,6 +679,7 @@ impl Render for ApexShell {
                     } else {
                         "HTTP: idle"
                     })
+                    .child(format!("watch: {}", self.workspace_watch_status))
                     .child("proxy: direct")
                     .child("TLS: rustls")
                     .child(div().flex_1())
@@ -647,12 +727,24 @@ fn browser_folder_item(label: &str, id: &str, node: BrowserNode) -> TreeItem {
     item
 }
 
+fn workspace_browser_items(requests: &[WorkspaceRequestEntry]) -> Vec<TreeItem> {
+    if requests.is_empty() {
+        vec![
+            TreeItem::new("local-drafts", "Local Drafts")
+                .expanded(true)
+                .child(TreeItem::new("gui-draft", "GUI Draft")),
+        ]
+    } else {
+        workspace_tree(requests)
+    }
+}
+
 struct CollectionsPanel {
     focus_handle: FocusHandle,
     tree_state: Entity<TreeState>,
     request_panel: Entity<RequestPanel>,
     repository: Option<WorkspaceRepository>,
-    request_paths: Arc<HashMap<String, PathBuf>>,
+    request_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
     error: Option<String>,
 }
 
@@ -663,7 +755,7 @@ impl CollectionsPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let request_paths = Arc::new(
+        let request_paths = Arc::new(RwLock::new(
             browser
                 .requests
                 .iter()
@@ -674,16 +766,8 @@ impl CollectionsPanel {
                     )
                 })
                 .collect::<HashMap<_, _>>(),
-        );
-        let items = if browser.requests.is_empty() {
-            vec![
-                TreeItem::new("local-drafts", "Local Drafts")
-                    .expanded(true)
-                    .child(TreeItem::new("gui-draft", "GUI Draft")),
-            ]
-        } else {
-            workspace_tree(&browser.requests)
-        };
+        ));
+        let items = workspace_browser_items(&browser.requests);
         let tree_state = cx.new(|cx| TreeState::new(cx).items(items));
         Self {
             focus_handle: cx.focus_handle(),
@@ -693,6 +777,34 @@ impl CollectionsPanel {
             request_paths,
             error: browser.error,
         }
+    }
+
+    fn apply_request_index(
+        &mut self,
+        requests: Result<Vec<WorkspaceRequestEntry>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match requests {
+            Ok(requests) => {
+                if let Ok(mut request_paths) = self.request_paths.write() {
+                    *request_paths = requests
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.relative_path.to_string_lossy().into_owned(),
+                                entry.path.clone(),
+                            )
+                        })
+                        .collect();
+                }
+                let items = workspace_browser_items(&requests);
+                self.tree_state
+                    .update(cx, |state, cx| state.set_items(items, cx));
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
     }
 }
 
@@ -767,9 +879,12 @@ impl Render for CollectionsPanel {
                                 .child(Icon::new(icon).xsmall())
                                 .child(entry.item().label.clone()),
                         );
+                    let request_path = request_paths
+                        .read()
+                        .ok()
+                        .and_then(|paths| paths.get(&id).cloned());
                     if !entry.is_folder()
-                        && let (Some(repository), Some(path)) =
-                            (repository.clone(), request_paths.get(&id).cloned())
+                        && let (Some(repository), Some(path)) = (repository.clone(), request_path)
                     {
                         let request_panel = request_panel.clone();
                         item = item.on_click(move |_, window, cx| {
@@ -797,6 +912,344 @@ impl Render for CollectionsPanel {
                 },
             )))
             .border_color(cx.theme().border)
+    }
+}
+
+const HISTORY_PANEL_LIMIT: usize = 200;
+
+struct HistoryPanel {
+    focus_handle: FocusHandle,
+    tree_state: Entity<TreeState>,
+    entries: Arc<RwLock<HashMap<String, HistoryEntry>>>,
+    order: Vec<String>,
+    database_path: Option<PathBuf>,
+    request_panel: Entity<RequestPanel>,
+    loading: bool,
+    error: Option<String>,
+    diff_summary: Option<String>,
+}
+
+impl HistoryPanel {
+    fn new(
+        request_panel: Entity<RequestPanel>,
+        repository: Option<&WorkspaceRepository>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let entries = Arc::new(RwLock::new(HashMap::new()));
+        let tree_state = cx.new(|cx| {
+            TreeState::new(cx).items(vec![TreeItem::new("__history-loading", "Loading history…")])
+        });
+        let mut panel = Self {
+            focus_handle: cx.focus_handle(),
+            tree_state,
+            entries,
+            order: Vec::new(),
+            database_path: repository
+                .map(|repository| repository.root().join(".apex").join("history.sqlite")),
+            request_panel,
+            loading: false,
+            error: None,
+            diff_summary: None,
+        };
+        panel.refresh(cx);
+        panel
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.database_path.clone() else {
+            self.loading = false;
+            self.error = Some("Open a workspace to view request history.".to_owned());
+            self.tree_state.update(cx, |state, cx| {
+                state.set_items(
+                    vec![TreeItem::new("__history-no-workspace", "No workspace")],
+                    cx,
+                );
+            });
+            cx.notify();
+            return;
+        };
+        self.loading = true;
+        self.error = None;
+        self.diff_summary = None;
+        self.tree_state.update(cx, |state, cx| {
+            state.set_items(
+                vec![TreeItem::new("__history-loading", "Loading history…")],
+                cx,
+            );
+        });
+        let receiver = match start_history_panel_load(path) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.loading = false;
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let _ = this.update(cx, |panel, cx| {
+                panel.loading = false;
+                match result {
+                    Ok(entries) => panel.apply_entries(entries, cx),
+                    Err(error) => {
+                        panel.error = Some(error);
+                        panel.tree_state.update(cx, |state, cx| {
+                            state.set_items(
+                                vec![TreeItem::new("__history-error", "History unavailable")],
+                                cx,
+                            );
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_entries(&mut self, entries: Vec<HistoryEntry>, cx: &mut Context<Self>) {
+        self.order = entries
+            .iter()
+            .map(|entry| entry.record.execution_id.clone())
+            .collect();
+        if let Ok(mut stored) = self.entries.write() {
+            *stored = entries
+                .iter()
+                .cloned()
+                .map(|entry| (entry.record.execution_id.clone(), entry))
+                .collect();
+        }
+        let items = if entries.is_empty() {
+            vec![TreeItem::new("__history-empty", "No history entries")]
+        } else {
+            entries
+                .into_iter()
+                .map(|entry| {
+                    let record = entry.record;
+                    let status = record
+                        .status
+                        .map_or_else(|| "ERR".to_owned(), |value| value.to_string());
+                    let snapshot = entry.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.request_toml.is_some() || snapshot.response_body.is_some()
+                    });
+                    TreeItem::new(
+                        record.execution_id,
+                        format!(
+                            "{} {} · {}ms{}",
+                            status,
+                            record.request_name,
+                            record.duration_ms,
+                            if snapshot { " · snapshot" } else { "" }
+                        ),
+                    )
+                })
+                .collect()
+        };
+        self.tree_state
+            .update(cx, |state, cx| state.set_items(items, cx));
+        self.error = None;
+    }
+
+    fn compare_latest(&mut self, cx: &mut Context<Self>) {
+        let Some((left_id, right_id)) = self.order.get(1).zip(self.order.first()) else {
+            self.diff_summary = Some("At least two history entries are required.".to_owned());
+            cx.notify();
+            return;
+        };
+        let entries = match self.entries.read() {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.diff_summary = Some("History state is temporarily unavailable.".to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        let (Some(left), Some(right)) = (entries.get(left_id), entries.get(right_id)) else {
+            self.diff_summary = Some("History entries changed; refresh and try again.".to_owned());
+            cx.notify();
+            return;
+        };
+        let diff = semantic_response_diff(left, right, &SemanticDiffPolicy::default());
+        self.diff_summary = Some(format!(
+            "Latest vs previous: status {} · {} header change(s) · {} cookie change(s) · {}",
+            if diff.status.changed {
+                "changed"
+            } else {
+                "same"
+            },
+            diff.headers.len(),
+            diff.cookies.len(),
+            history_body_diff_label(&diff.body)
+        ));
+        cx.notify();
+    }
+}
+
+fn start_history_panel_load(
+    path: PathBuf,
+) -> Result<async_channel::Receiver<Result<Vec<HistoryEntry>, String>>, String> {
+    let (sender, receiver) = async_channel::bounded(1);
+    thread::Builder::new()
+        .name("apex-history-panel-load".to_owned())
+        .spawn(move || {
+            let result = HistoryDatabase::open(path)
+                .and_then(|database| {
+                    database.query(&HistoryQuery {
+                        limit: HISTORY_PANEL_LIMIT,
+                        ..HistoryQuery::default()
+                    })
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send_blocking(result);
+        })
+        .map_err(|error| format!("failed to spawn history loader: {error}"))?;
+    Ok(receiver)
+}
+
+fn history_body_diff_label(body: &BodyDifference) -> &'static str {
+    match body {
+        BodyDifference::Unavailable => "body unavailable",
+        BodyDifference::Unchanged => "body unchanged",
+        BodyDifference::Json(_) => "JSON changed",
+        BodyDifference::Text(_) => "text changed",
+        BodyDifference::Binary(_) => "binary changed",
+    }
+}
+
+impl Focusable for HistoryPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for HistoryPanel {}
+
+impl Panel for HistoryPanel {
+    fn panel_name(&self) -> &'static str {
+        "HistoryPanel"
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        "History"
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl Render for HistoryPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entries = self.entries.clone();
+        let request_panel = self.request_panel.clone();
+        gpui_component::v_flex()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .child(
+                        Button::new("history-refresh")
+                            .label(if self.loading { "Loading…" } else { "Refresh" })
+                            .disabled(self.loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .child(
+                        Button::new("history-compare-latest")
+                            .label("Compare latest")
+                            .disabled(self.order.len() < 2)
+                            .on_click(cx.listener(|this, _, _, cx| this.compare_latest(cx))),
+                    ),
+            )
+            .when_some(self.error.clone(), |panel, error| {
+                panel.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            })
+            .when_some(self.diff_summary.clone(), |panel, summary| {
+                panel.child(div().px_2().py_1().text_sm().child(summary))
+            })
+            .child(div().flex_1().min_h_0().child(tree(
+                &self.tree_state,
+                move |ix, entry, selected, _, _| {
+                    let id = entry.item().id.to_string();
+                    let mut item = ListItem::new(ix)
+                        .selected(selected)
+                        .child(entry.item().label.clone());
+                    if !id.starts_with("__") {
+                        let entries = entries.clone();
+                        let request_panel = request_panel.clone();
+                        item = item.on_click(move |_, window, cx| {
+                            let entry = entries
+                                .read()
+                                .ok()
+                                .and_then(|entries| entries.get(&id).cloned());
+                            let Some(entry) = entry else {
+                                window.push_notification(
+                                    Notification::warning(
+                                        "History entry changed; refresh and try again.",
+                                    ),
+                                    cx,
+                                );
+                                return;
+                            };
+                            let Some(request_toml) = entry
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.request_toml.as_deref())
+                            else {
+                                window.push_notification(
+                                    Notification::warning(
+                                        "This entry has no request snapshot. Enable request snapshots when sending.",
+                                    ),
+                                    cx,
+                                );
+                                return;
+                            };
+                            match apex_workspace::parse_request(request_toml) {
+                                Ok(document) => request_panel.update(cx, |panel, cx| {
+                                    match panel.open_history_document(document, window, cx) {
+                                        Ok(()) => window.push_notification(
+                                            Notification::success(
+                                                "Restored history entry as an unsaved draft. Use Send to resend it.",
+                                            ),
+                                            cx,
+                                        ),
+                                        Err(error) => window.push_notification(
+                                            Notification::error(format!(
+                                                "History restore failed: {error}"
+                                            )),
+                                            cx,
+                                        ),
+                                    }
+                                }),
+                                Err(error) => window.push_notification(
+                                    Notification::error(format!(
+                                        "Stored request snapshot is invalid: {error}"
+                                    )),
+                                    cx,
+                                ),
+                            }
+                        });
+                    }
+                    item
+                },
+            )))
     }
 }
 
@@ -896,6 +1349,80 @@ impl DocumentStore {
     fn resource_root(&self) -> PathBuf {
         self.repository.root().to_owned()
     }
+
+    fn relative_path_in(&self, repository: &WorkspaceRepository) -> Option<PathBuf> {
+        if self.repository.root() != repository.root() {
+            return None;
+        }
+        self.path
+            .strip_prefix(repository.root())
+            .ok()
+            .map(Path::to_owned)
+    }
+
+    fn from_relative(repository: WorkspaceRepository, relative_path: &Path) -> Self {
+        let path = repository.root().join(relative_path);
+        Self { repository, path }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingExternalDocument {
+    store: DocumentStore,
+    request: HttpRequest,
+    fingerprint: FileFingerprint,
+    reason: ExternalChangeReason,
+}
+
+#[derive(Clone, Debug)]
+enum RequestExternalState {
+    InSync,
+    Checking { reason: ExternalChangeReason },
+    ReloadAvailable(PendingExternalDocument),
+    Conflict(PendingExternalDocument),
+    Missing { message: String, conflict: bool },
+    Failed { message: String, conflict: bool },
+}
+
+impl RequestExternalState {
+    fn blocks_save(&self) -> Option<String> {
+        match self {
+            Self::InSync => None,
+            Self::Checking { .. } => Some(
+                "the request is being checked after an external workspace change".to_owned(),
+            ),
+            Self::ReloadAvailable(_) => Some(
+                "a newer disk version is available; reload it before saving".to_owned(),
+            ),
+            Self::Conflict(_) => Some(
+                "the request changed externally while local edits were present; reload the disk version or preserve the local content elsewhere before saving"
+                    .to_owned(),
+            ),
+            Self::Missing { message, .. } | Self::Failed { message, .. } => Some(message.clone()),
+        }
+    }
+
+    fn has_attention(&self) -> bool {
+        !matches!(self, Self::InSync)
+    }
+}
+
+type ExternalDocumentLoad = Result<(DocumentStore, HttpRequest, FileFingerprint), String>;
+
+fn load_document_off_thread(
+    store: DocumentStore,
+) -> Result<async_channel::Receiver<ExternalDocumentLoad>, String> {
+    let (sender, receiver) = async_channel::bounded(1);
+    thread::Builder::new()
+        .name("apex-workspace-document-load".to_owned())
+        .spawn(move || {
+            let result = store
+                .load()
+                .map(|(request, fingerprint)| (store, request, fingerprint));
+            let _ = sender.send_blocking(result);
+        })
+        .map_err(|error| format!("failed to spawn workspace document loader: {error}"))?;
+    Ok(receiver)
 }
 
 fn draft_state_root() -> Result<PathBuf, String> {
@@ -992,6 +1519,8 @@ struct RequestPanel {
     document_store: Option<DocumentStore>,
     document_fingerprint: Option<FileFingerprint>,
     document_error: Option<String>,
+    external_state: RequestExternalState,
+    external_generation: u64,
     variable_context: VariableContext,
     environment_label: String,
     variable_error: Option<String>,
@@ -1037,14 +1566,12 @@ impl RequestPanel {
         });
         let url_subscription = cx.subscribe(&url_state, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
-                this.dirty = true;
-                cx.notify();
+                this.mark_dirty_from_editor(cx);
             }
         });
         let body_subscription = cx.subscribe(&body_state, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
-                this.dirty = true;
-                cx.notify();
+                this.mark_dirty_from_editor(cx);
             }
         });
         Self {
@@ -1061,12 +1588,159 @@ impl RequestPanel {
             document_store,
             document_fingerprint,
             document_error,
+            external_state: RequestExternalState::InSync,
+            external_generation: 0,
             variable_context,
             environment_label,
             variable_error,
             dirty: false,
             _subscriptions: vec![url_subscription, body_subscription],
         }
+    }
+
+    fn mark_dirty_from_editor(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
+        if let RequestExternalState::ReloadAvailable(pending) = self.external_state.clone() {
+            self.external_state = RequestExternalState::Conflict(pending);
+        }
+        cx.notify();
+    }
+
+    fn observe_workspace_change(
+        &mut self,
+        repository: WorkspaceRepository,
+        change: &WorkspaceChange,
+        cx: &mut Context<Self>,
+    ) {
+        let current_path = self
+            .document_store
+            .as_ref()
+            .and_then(|store| store.relative_path_in(&repository));
+        let reconciliation =
+            reconcile_workspace_change(current_path.as_deref(), self.dirty, change);
+        match reconciliation.document {
+            DocumentReconcileAction::None => {}
+            DocumentReconcileAction::Verify {
+                path,
+                reason,
+                conflict_if_changed,
+            } => {
+                let store = DocumentStore::from_relative(repository, &path);
+                self.start_external_verification(store, reason, conflict_if_changed, cx);
+            }
+            DocumentReconcileAction::Missing {
+                path,
+                reason,
+                had_unsaved_changes,
+            } => {
+                self.external_generation = self.external_generation.wrapping_add(1);
+                let local_detail = if had_unsaved_changes {
+                    " Local edits remain in memory and were not overwritten."
+                } else {
+                    ""
+                };
+                self.external_state = RequestExternalState::Missing {
+                    message: format!("{}: {}.{}", reason.summary(), path.display(), local_detail),
+                    conflict: had_unsaved_changes,
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    fn start_external_verification(
+        &mut self,
+        store: DocumentStore,
+        reason: ExternalChangeReason,
+        conflict_if_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_generation = self.external_generation.wrapping_add(1);
+        let generation = self.external_generation;
+        self.external_state = RequestExternalState::Checking {
+            reason: reason.clone(),
+        };
+        let receiver = match load_document_off_thread(store) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.external_state = RequestExternalState::Failed {
+                    message: error,
+                    conflict: conflict_if_changed || self.dirty,
+                };
+                cx.notify();
+                return;
+            }
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let _ = this.update(cx, |panel, cx| {
+                if panel.external_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok((store, request, fingerprint)) => {
+                        let unchanged = panel.document_fingerprint == Some(fingerprint)
+                            && panel
+                                .document_store
+                                .as_ref()
+                                .is_some_and(|current| current.path() == store.path());
+                        if unchanged {
+                            panel.external_state = RequestExternalState::InSync;
+                        } else {
+                            let pending = PendingExternalDocument {
+                                store,
+                                request,
+                                fingerprint,
+                                reason,
+                            };
+                            if conflict_if_changed || panel.dirty {
+                                panel.external_state = RequestExternalState::Conflict(pending);
+                            } else {
+                                panel.external_state =
+                                    RequestExternalState::ReloadAvailable(pending);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let conflict = conflict_if_changed || panel.dirty;
+                        panel.external_state = RequestExternalState::Failed {
+                            message: format!(
+                                "{}; disk verification failed: {error}",
+                                reason.summary()
+                            ),
+                            conflict,
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn reload_external(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = match &self.external_state {
+            RequestExternalState::ReloadAvailable(pending)
+            | RequestExternalState::Conflict(pending) => pending.clone(),
+            _ => return,
+        };
+        self.apply_request(
+            pending.request,
+            pending.store,
+            pending.fingerprint,
+            window,
+            cx,
+        );
+    }
+
+    fn has_external_attention(&self) -> bool {
+        self.external_state.has_attention()
     }
 
     fn is_running(&self) -> bool {
@@ -1116,6 +1790,8 @@ impl RequestPanel {
         self.document_store = Some(store);
         self.document_fingerprint = Some(fingerprint);
         self.document_error = None;
+        self.external_generation = self.external_generation.wrapping_add(1);
+        self.external_state = RequestExternalState::InSync;
         self.selected_section = RequestSection::Params;
         self.dirty = false;
         self.response_panel.update(cx, |panel, cx| {
@@ -1149,8 +1825,43 @@ impl RequestPanel {
             HttpMethod::Patch => HttpMethod::Delete,
             _ => HttpMethod::Get,
         };
+        self.mark_dirty_from_editor(cx);
+    }
+
+    fn open_history_document(
+        &mut self,
+        document: RequestDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.dirty {
+            return Err(
+                "save or discard the current request before restoring a history entry".to_owned(),
+            );
+        }
+        self.cancel(cx);
+        let (store, loaded) = DocumentStore::open_draft()?;
+        let request = document.request;
+        self.method = request.method.clone();
+        self.url_state
+            .update(cx, |state, cx| state.set_value(&request.url, window, cx));
+        self.body_state.update(cx, |state, cx| {
+            state.set_value(editor_body(&request.body), window, cx);
+        });
+        self.base_request = request;
+        self.document_store = Some(store);
+        self.document_fingerprint = loaded.map(|(_, fingerprint)| fingerprint);
+        self.document_error = None;
+        self.external_generation = self.external_generation.wrapping_add(1);
+        self.external_state = RequestExternalState::InSync;
+        self.selected_section = RequestSection::Params;
         self.dirty = true;
+        self.response_panel.update(cx, |panel, cx| {
+            panel.reset();
+            cx.notify();
+        });
         cx.notify();
+        Ok(())
     }
 
     fn new_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1174,6 +1885,8 @@ impl RequestPanel {
         self.document_store = store;
         self.document_fingerprint = fingerprint;
         self.document_error = store_error;
+        self.external_generation = self.external_generation.wrapping_add(1);
+        self.external_state = RequestExternalState::InSync;
         self.selected_section = RequestSection::Params;
         self.dirty = true;
         self.response_panel.update(cx, |panel, cx| {
@@ -1184,6 +1897,9 @@ impl RequestPanel {
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) -> Result<PathBuf, String> {
+        if let Some(error) = self.external_state.blocks_save() {
+            return Err(error);
+        }
         if let Some(error) = &self.document_error {
             return Err(error.clone());
         }
@@ -1311,6 +2027,78 @@ impl RequestPanel {
         .detach();
     }
 
+    fn external_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (message, conflict, reload_label) = match &self.external_state {
+            RequestExternalState::InSync => return None,
+            RequestExternalState::Checking { reason } => (
+                format!("Checking disk state because {}.", reason.summary()),
+                false,
+                None,
+            ),
+            RequestExternalState::ReloadAvailable(pending) => (
+                format!(
+                    "{}; a newer version is available at {}.",
+                    pending.reason.summary(),
+                    pending.store.path().display()
+                ),
+                false,
+                Some("Reload from disk"),
+            ),
+            RequestExternalState::Conflict(pending) => (
+                format!(
+                    "{}; local edits were preserved and the disk version at {} was not applied.",
+                    pending.reason.summary(),
+                    pending.store.path().display()
+                ),
+                true,
+                Some("Discard local edits and reload"),
+            ),
+            RequestExternalState::Missing { message, conflict } => (
+                if *conflict {
+                    format!("{message} Resolve the conflict before saving.")
+                } else {
+                    message.clone()
+                },
+                *conflict,
+                None,
+            ),
+            RequestExternalState::Failed { message, conflict } => (
+                if *conflict {
+                    format!("{message}. Local edits remain in memory.")
+                } else {
+                    message.clone()
+                },
+                *conflict,
+                None,
+            ),
+        };
+        let border_color = if conflict {
+            cx.theme().danger
+        } else {
+            cx.theme().accent
+        };
+        let mut row = h_flex()
+            .w_full()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(border_color)
+            .child(div().flex_1().text_sm().child(message));
+        if let Some(label) = reload_label {
+            row = row.child(
+                Button::new("reload-external-request")
+                    .label(label)
+                    .when(conflict, |button| button.danger())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.reload_external(window, cx);
+                    })),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
     fn section_content(&self, cx: &App) -> gpui::AnyElement {
         match self.selected_section {
             RequestSection::Body if body_is_editable(&self.base_request.body) => {
@@ -1378,10 +2166,15 @@ impl Panel for RequestPanel {
     }
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         format!(
-            "{} {}{}",
+            "{} {}{}{}",
             self.method.as_str(),
             self.base_request.name,
-            if self.dirty { " •" } else { "" }
+            if self.dirty { " •" } else { "" },
+            if self.has_external_attention() {
+                " ⚠"
+            } else {
+                ""
+            }
         )
     }
     fn closable(&self, _: &App) -> bool {
@@ -1391,6 +2184,7 @@ impl Panel for RequestPanel {
 impl Render for RequestPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let running = self.is_running();
+        let external_banner = self.external_banner(cx);
         gpui_component::v_flex()
             .size_full()
             .gap_2()
@@ -1435,6 +2229,7 @@ impl Render for RequestPanel {
                         )
                     }),
             )
+            .when_some(external_banner, |panel, banner| panel.child(banner))
             .child(
                 TabBar::new("request-sections")
                     .underline()

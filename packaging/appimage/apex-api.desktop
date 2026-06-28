@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ApexAPI
+Comment=Local-first API development client
+Exec=apex
+Icon=apex-api
+Categories=Development;Network;
+Terminal=false

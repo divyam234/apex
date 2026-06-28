@@ -75,6 +75,69 @@ Every loaded document carries a content fingerprint. Atomic save checks the curr
 writes a same-directory temporary file, flushes it, renames it, and flushes the directory. An
 external edit becomes a typed conflict; it is never overwritten silently.
 
+`apex-workspace` also owns recursive filesystem observation. Backend events are normalized into
+workspace-relative typed paths, while access noise, internal state, editor temporaries, and
+traversal-shaped paths are discarded. The app-side queue is bounded to 1,024 events. Backend rescan
+requests and queue overflow both become an explicit `RescanRequired` change so consumers refresh
+from durable files instead of assuming an incomplete event stream is authoritative. GPUI decides how
+to reconcile those changes with clean or dirty documents; the watcher itself has no UI dependency.
+
+`apex-ui` owns a bounded background monitor bridge. It receives watcher events and rebuilds request
+indexes off the render thread. The active request is compared by workspace-relative path and then
+loaded on a dedicated worker for fingerprint verification. Matching fingerprints are ignored as
+self-save noise. A changed clean document offers an explicit reload, while a changed dirty document
+enters conflict state and blocks save until the user deliberately discards or preserves local edits.
+Removal and rename states remain visible instead of silently replacing editor content.
+
+## Collection and environment mutation boundary
+
+`apex-workspace` owns collection, folder, request-order, environment, and local-override mutations.
+Collections and folders use stable IDs in `collection.toml` and `folder.toml`; `.apex-order.toml`
+controls deterministic traversal without filename prefixes. Destructive operations require bounded
+content-and-structure fingerprints, reject symlinks, stage copies before publication, and preserve or
+re-key identities according to operation semantics. Archive state is ordinary Git-visible metadata.
+
+Environment IDs remain stable filenames while display names may change. Creation and updates use the
+same fingerprint-checked atomic writer as requests. Default changes are manifest-guarded; deleting a
+default environment is rejected until another default is selected. Deletion moves the durable file
+and ignored local override into a local tombstone together, rolls back on partial failure, and reports
+any cleanup path that remains. Effective-variable inspection reports precedence and source labels but
+renders all sensitive and secret values as redacted text.
+
+## Search, import, and export boundaries
+
+The local search index is rebuildable SQLite under `.apex/search.sqlite`; workspace files remain the
+only durable source of truth. Refresh compares request fingerprints, updates only changed documents,
+removes deleted paths, and enforces document, byte, term, and result limits. Authentication is never
+indexed. Sensitive header/form/multipart values are omitted while their field names remain searchable.
+Fuzzy SQL patterns escape wildcard characters before execution.
+
+`apex-import` parses Postman Collection v2.1 with explicit byte, item, and nesting limits. Converted
+requests preserve duplicate/disabled headers and supported body modes. Scripts, authentication,
+variables, examples, protocol behavior, and unknown fields become stable diagnostics and
+`unsupported_fields`; credential values are never copied into reports. Schema versions other than
+v2.1 are rejected rather than guessed.
+
+`apex-export` is independent of the UI and generates redacted cURL, HTTPie, Rust reqwest, Python
+requests, and Go net/http snippets. Duplicate-header limitations and incomplete multipart/file/TLS
+assembly are surfaced as warnings. Revealing sensitive values requires an explicit API option; the
+CLI intentionally uses redacted defaults only.
+
+## History and semantic comparison boundary
+
+`apex-history` schema v2 stores metadata separately from optional snapshots. Snapshot capture is
+disabled by default, byte-bounded, and transactionally committed with metadata. Request snapshots use
+the stable workspace request format and must pass secret-leak detection. Response snapshots redact
+configured headers, truncate bodies explicitly, and preserve status/content type. Schema v1 databases
+migrate in place without losing existing metadata.
+
+Filtered history queries are parameterized and bounded. Restoring a request parses the stored stable
+format; truncated snapshots cannot be restored. Semantic comparison is display-independent and covers
+status, duration, response size, duplicate headers, cookies, bounded structural JSON pointers, bounded
+text changes, and binary length/first-difference data. The CLI exposes list filters, restore, and diff.
+The native History dock loads off the render thread, compares the two latest entries, and restores a
+snapshot as an unsaved draft that uses the existing shared Send path for resend.
+
 ## Implementation map
 
 | Crate | Status | Implemented responsibility |
@@ -82,7 +145,7 @@ external edit becomes a typed conflict; it is never overwritten silently.
 | apex-domain | Implemented | Requests, methods, duplicate fields, bodies, errors, events, timings, cancellation |
 | apex-variables | Implemented Phase 4B | Hierarchy, durable workspace/environment loading, full-request resolution, defaults, nested access, cycles, traces, sensitivity |
 | apex-secrets | Foundation | Session/env stores, redaction, leak detection, zeroed buffer |
-| apex-workspace | Implemented foundation | Stable request and variable-set formats, environments/local overrides, request index, atomic saves, conflicts, path safety |
+| apex-workspace | Implemented Phase 4C core | Stable request and variable-set formats, environments/local overrides, request index, atomic saves, conflicts, path safety, bounded recursive change observation |
 | apex-runner | Implemented contracts | Adapter trait, contexts, events, stored responses, bounded concurrency |
 | apex-http | Implemented Phase 2B | Real HTTP execution, auth, cookies, decompression, redirects, streaming, limits, downloads, trailers |
 | apex-import | cURL partial | Preview/report model and non-secret cURL conversion |
@@ -115,3 +178,9 @@ secret values. `apex-variables` composes workspace, selected environment, and ig
 layers, then resolves every request field through one API used by both frontends. The HTTP adapter
 accepts only the resulting resolved request. This prevents GUI/CLI precedence drift and guarantees
 that unresolved placeholders fail before socket creation.
+
+## Phase 5–9 boundaries
+
+Automation is separated into `apex-scripting` and `apex-runner`; protocols into `apex-protocols`; API lifecycle into `apex-contracts` and `apex-mock`; collaboration and optional extensions into `apex-git`, `apex-plugins`, and `apex-ai`; hardening primitives into `apex-quality` and `apex-security`. Each crate is usable without GPUI and has focused unit or integration tests.
+
+Adapters intentionally own external transports and credentials. The protocol models do not claim a production gRPC socket implementation, the plugin host does not claim an embedded interpreter, and mock TLS is not enabled without a certificate transport adapter. Trust, redaction, size limits, cancellation, and bounded retention are enforced before adapter calls.

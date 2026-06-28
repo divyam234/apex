@@ -1,5 +1,16 @@
 #![forbid(unsafe_code)]
 
+pub mod assertion;
+pub mod collection;
+pub mod monitor;
+pub use assertion::{
+    Assertion, AssertionContext, AssertionResult, AssertionState, JsonType, evaluate_all,
+};
+pub use collection::{
+    CookiePolicy, FailurePolicy, ItemExecution, ItemExecutor, ItemRunResult, ReportError,
+    RunConfig, RunEvent, RunEventSink, RunItem, RunSummary, run_collection,
+};
+
 use apex_domain::{
     CancellationToken, ExecutionError, ExecutionEvent, ExecutionId, HttpRequest,
     ProtocolCapabilities, ProtocolId, TimingEntry,

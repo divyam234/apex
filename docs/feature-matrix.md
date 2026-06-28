@@ -1,7 +1,7 @@
 # Honest feature matrix
 
-Audit date: 2026-06-24. Competitor cells summarize documented product direction at the audit date.
-ApexAPI statuses apply only to this checkpoint.
+Competitor audit date: 2026-06-24. Competitor cells summarize documented product direction at that date.
+ApexAPI checkpoint status was verified on 2026-06-26.
 
 Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Experimental planned**.
 
@@ -30,8 +30,8 @@ Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Expe
 | WebSocket/SSE/gRPC | Broad protocol tooling | Focused HTTP/GraphQL | Strong real-time breadth | Multiple protocols | Evolving | **Planned Phase 6** |
 | Scripts/assertions | Mature | Limited | Scripts/tests | Scripts/tests | Scripts/tests | **Planned Phase 5; disabled** |
 | OpenAPI lifecycle | Broad | Import | Import/generation | Design/spec workflows | Import | **Planned Phase 7** |
-| cURL import preview | Supported | Supported | Supported | Supported | Supported | **Implemented partial** |
-| Postman v2.1 import | Native | Import | Import | Import | Import | **Planned** |
+| cURL import preview | Supported | Supported | Supported | Supported | Supported | **Implemented partial**, credential values excluded from reports |
+| Postman v2.1 import | Native | Import | Import | Import | Import | **Implemented partial**: requests/body modes plus explicit loss report; scripts/auth/variables remain unsupported |
 | Local mock server | Supported | Varies | Supported | Supported | Supported | **Planned; fixtures are test-only** |
 | Constrained third-party plugins | Product-specific | Product-specific | Product-specific | Plugin ecosystem | Extension model | **Planned WASM model; loading disabled** |
 
@@ -45,10 +45,17 @@ Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Expe
 | Workspace-path launch | Implemented | Positional path or `--workspace/-w` |
 | Nested request indexing | Implemented | `WorkspaceRepository::list_requests`, stable ordering test |
 | Workspace request open/save | Implemented foundation | Dirty guard, field preservation, atomic fingerprint save |
+| Workspace filesystem observation | Implemented Phase 4D | Recursive typed events, bounded queues, live tree refresh, verified reload/conflict UX |
+| Collection/folder mutations | Implemented Phase 4E core | Stable metadata/order, guarded create/rename/move/duplicate/archive/delete; native dialogs pending |
+| Incremental global request search | Implemented Phase 4F core | Rebuildable bounded SQLite index, exact/fuzzy field filters, sensitive values excluded; native panel pending |
+| Redacted code generation | Implemented Phase 4F foundation | cURL, HTTPie, Rust reqwest, Python requests, Go net/http; target limitations reported |
+| Privacy-governed history snapshots | Implemented Phase 4G | Default-off bounded request/response snapshots, v1→v2 migration, redacted headers, filtered queries |
+| History restore/resend | Implemented Phase 4G | CLI restore and native draft restore; resend uses shared request execution path |
+| Semantic response diff | Implemented Phase 4G | Status, timing, size, duplicate headers, cookies, JSON, text, binary; bounded and deterministic |
 | Tab lifecycle | Tested model | Preview/pin/reorder/close/reopen; visual multi-tab wiring pending |
 | HTTP adapter | Implemented Phase 2B | `crates/apex-http`, 23 real-network tests |
 | CLI send | Implemented | Same adapter/resolver, environment selection, Ctrl+C, JSON/human/quiet, downloads, optional history |
-| Workspace/environment variables | Implemented Phase 4B | Stable files, nested values, secret/process references, local override, list/inspect CLI |
+| Workspace/environment variables | Implemented Phase 4E foundation | Atomic CRUD/default handling, local override lifecycle, source inspection, redacted CLI administration |
 | Shared request resolution | Implemented Phase 4B | GUI and CLI resolve URL/query/headers/auth/all bodies and fail before send |
 | Multipart streamed files | Implemented | Durable fields, workspace containment, integration test |
 | Response memory bound | Implemented | Threshold spill plus wire and decoded hard maxima |
@@ -58,3 +65,9 @@ Legend: **Implemented**, **Compiled shell**, **Foundation**, **Planned**, **Expe
 | Proxy/SOCKS/NO_PROXY | Planned Phase 2C | Not claimed |
 | Digest/OAuth/OIDC/AWS SigV4/JWT/mTLS | Planned Phase 2C+ | Not claimed |
 | Git UI/WASM plugins/AI | Planned Phase 8 | Not claimed |
+
+## Phase 5–9 completion addendum (2026-06-26)
+
+Implemented and tested foundations now include constrained scripting, structured assertions, bounded collection execution and reports, headless monitors, GraphQL request/introspection models, bounded stream sessions, fixture-tested gRPC interaction modes, OpenAPI 3.0/3.1 parsing/generation/diff, a real loopback mock server, optional Git and workspace trust controls, import-free WebAssembly validation, disabled-by-default AI provider contracts, focus/virtualization quality primitives, and malicious-input security coverage.
+
+The following remain adapter or release-environment boundaries rather than completed native integrations: GraphQL subscription transport, production gRPC networking/reflection transport, automatic remote OpenAPI reference fetching, mock-server TLS termination, a bundled WebAssembly interpreter, signed desktop packages, and a desktop assistive-technology audit. See `docs/release-status.md`.

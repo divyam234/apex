@@ -1,0 +1,20 @@
+pkgname=apex-api
+pkgver=0.1.0_alpha1
+pkgrel=1
+pkgdesc='Local-first API development client and CLI'
+arch=('x86_64' 'aarch64')
+url='https://github.com/example/apex-api'
+license=('Apache-2.0')
+makedepends=('rust')
+source=()
+sha256sums=()
+
+build() {
+  cd "$srcdir/apex-api"
+  cargo build --release --locked -p apex-cli
+}
+
+package() {
+  install -Dm755 "$srcdir/apex-api/target/release/apex" "$pkgdir/usr/bin/apex"
+  install -Dm644 "$srcdir/apex-api/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

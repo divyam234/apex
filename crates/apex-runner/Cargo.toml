@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 apex-domain = { path = "../apex-domain" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

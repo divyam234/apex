@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 async-channel.workspace = true
 apex-domain = { path = "../apex-domain" }
+apex-history = { path = "../apex-history" }
 apex-http = { path = "../apex-http" }
 apex-runner = { path = "../apex-runner" }
 apex-secrets = { path = "../apex-secrets" }

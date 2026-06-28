@@ -1,0 +1,30 @@
+[package]
+name = "apex-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+apex-contracts = { path = "../crates/apex-contracts" }
+apex-plugins = { path = "../crates/apex-plugins" }
+
+[[bin]]
+name = "openapi"
+path = "fuzz_targets/openapi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wasm_plugin"
+path = "fuzz_targets/wasm_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

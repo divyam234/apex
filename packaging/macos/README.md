@@ -1,4 +1,3 @@
-# Macos packaging
+# macOS packaging preparation
 
-Planned for the hardening/release phase. No installable package is claimed in Phase 2B.
-See ../../docs/packaging.md.
+The portable CLI is checked on `macos-latest` in CI. A notarized `.app`/DMG is intentionally not claimed until an Apple Developer identity, hardened-runtime entitlements, native GPUI verification, and notarization credentials are available. Release artifacts must include SHA-256 checksums and the Apache-2.0 license.

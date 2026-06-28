@@ -1,7 +1,8 @@
 use crate::{VariableContext, VariableScope};
-use apex_domain::StableId;
+use apex_domain::{StableId, ValueSensitivity};
 use apex_secrets::SecretStoreChain;
 use apex_workspace::{EnvironmentSummary, WorkspaceError, WorkspaceRepository};
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -22,6 +23,82 @@ pub struct LoadedWorkspaceVariables {
     pub context: VariableContext,
     pub environment: Option<EnvironmentSummary>,
     pub sources: Vec<VariableLayerSource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VariableCandidateInspection {
+    pub scope: VariableScope,
+    pub source_label: String,
+    pub enabled: bool,
+    pub sensitivity: ValueSensitivity,
+    pub selected: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveVariableInspection {
+    pub name: String,
+    pub selected_scope: Option<VariableScope>,
+    pub displayed_value: String,
+    pub candidates: Vec<VariableCandidateInspection>,
+}
+
+pub fn inspect_effective_variables(
+    loaded: &LoadedWorkspaceVariables,
+) -> Vec<EffectiveVariableInspection> {
+    let mut names = BTreeSet::new();
+    for (_, layer) in loaded.context.iter_layers() {
+        names.extend(layer.iter().map(|(name, _)| name.clone()));
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            let selected = loaded.context.effective_definition(&name);
+            let selected_scope = selected.map(|(scope, _)| scope);
+            let displayed_value = selected.map_or_else(
+                || "[UNRESOLVED]".to_owned(),
+                |(_, definition)| {
+                    if definition.sensitivity == ValueSensitivity::Public {
+                        definition.value.display_value()
+                    } else {
+                        "[REDACTED]".to_owned()
+                    }
+                },
+            );
+            let candidates = VariableScope::PRECEDENCE
+                .iter()
+                .filter_map(|scope| {
+                    loaded
+                        .context
+                        .layer(*scope)
+                        .and_then(|layer| layer.get(&name))
+                        .map(|definition| VariableCandidateInspection {
+                            scope: *scope,
+                            source_label: source_label(loaded, *scope),
+                            enabled: definition.enabled,
+                            sensitivity: definition.sensitivity,
+                            selected: selected_scope == Some(*scope) && definition.enabled,
+                            description: definition.description.clone(),
+                        })
+                })
+                .collect();
+            EffectiveVariableInspection {
+                name,
+                selected_scope,
+                displayed_value,
+                candidates,
+            }
+        })
+        .collect()
+}
+
+fn source_label(loaded: &LoadedWorkspaceVariables, scope: VariableScope) -> String {
+    loaded
+        .sources
+        .iter()
+        .find(|source| source.scope == scope)
+        .map_or_else(|| scope.label().to_owned(), |source| source.label.clone())
 }
 
 pub fn load_workspace_variables(
@@ -71,11 +148,15 @@ pub fn load_workspace_variables(
         label: environment.path.display().to_string(),
         variable_count: count,
     });
+    let has_local_override = repository
+        .local_environment_override_path(&environment.value.id)
+        .exists();
     loaded.environment = Some(EnvironmentSummary {
         id: environment.value.id.clone(),
         name: environment.value.name.clone(),
         path: environment.path,
         variable_count: environment.value.variables.len(),
+        has_local_override,
     });
 
     if selection.include_local_override
@@ -134,7 +215,7 @@ impl From<WorkspaceError> for WorkspaceVariableError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_domain::{ValueSensitivity, VariableValue};
+    use apex_domain::{ValueSensitivity, VariableDefinition, VariableValue};
     use apex_workspace::{
         StoredVariable, StoredVariableSource, VariableSetDocument, WorkspaceManifest,
     };
@@ -221,6 +302,84 @@ mod tests {
         assert_eq!(loaded.environment.expect("environment").name, "Development");
         assert_eq!(loaded.sources.len(), 3);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn effective_inspection_reports_sources_and_redacts_selected_secret() {
+        let mut loaded = LoadedWorkspaceVariables::default();
+        loaded.context.layer_mut(VariableScope::Workspace).insert(
+            "token",
+            VariableDefinition {
+                value: VariableValue::String("workspace-public".to_owned()),
+                sensitivity: ValueSensitivity::Public,
+                enabled: true,
+                description: Some("workspace candidate".to_owned()),
+            },
+        );
+        loaded.context.layer_mut(VariableScope::Environment).insert(
+            "token",
+            VariableDefinition {
+                value: VariableValue::String("top-secret".to_owned()),
+                sensitivity: ValueSensitivity::Secret,
+                enabled: true,
+                description: Some("secret candidate".to_owned()),
+            },
+        );
+        loaded
+            .context
+            .layer_mut(VariableScope::LocalEnvironmentOverride)
+            .insert(
+                "token",
+                VariableDefinition {
+                    value: VariableValue::String("disabled-local".to_owned()),
+                    sensitivity: ValueSensitivity::Sensitive,
+                    enabled: false,
+                    description: None,
+                },
+            );
+        loaded.sources = vec![
+            VariableLayerSource {
+                scope: VariableScope::Workspace,
+                label: "variables.toml".to_owned(),
+                variable_count: 1,
+            },
+            VariableLayerSource {
+                scope: VariableScope::Environment,
+                label: "environments/development.toml".to_owned(),
+                variable_count: 1,
+            },
+            VariableLayerSource {
+                scope: VariableScope::LocalEnvironmentOverride,
+                label: ".apex/environments/development.local.toml".to_owned(),
+                variable_count: 1,
+            },
+        ];
+
+        let inspection = inspect_effective_variables(&loaded);
+        assert_eq!(inspection.len(), 1);
+        let token = &inspection[0];
+        assert_eq!(token.name, "token");
+        assert_eq!(token.selected_scope, Some(VariableScope::Environment));
+        assert_eq!(token.displayed_value, "[REDACTED]");
+        assert!(!format!("{token:?}").contains("top-secret"));
+        assert_eq!(token.candidates.len(), 3);
+        assert_eq!(
+            token
+                .candidates
+                .iter()
+                .find(|candidate| candidate.selected)
+                .expect("selected candidate")
+                .source_label,
+            "environments/development.toml"
+        );
+        assert!(
+            !token
+                .candidates
+                .iter()
+                .find(|candidate| candidate.scope == VariableScope::LocalEnvironmentOverride)
+                .expect("local candidate")
+                .selected
+        );
     }
 
     #[test]
