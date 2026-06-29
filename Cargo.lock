@@ -298,9 +298,17 @@ dependencies = [
 name = "apex-ui"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "apex-ai",
+ "apex-contracts",
  "apex-domain",
+ "apex-export",
+ "apex-git",
  "apex-history",
  "apex-http",
+ "apex-import",
+ "apex-mock",
+ "apex-plugins",
+ "apex-protocols",
  "apex-runner",
  "apex-secrets",
  "apex-variables",
@@ -308,6 +316,7 @@ dependencies = [
  "async-channel 2.5.0",
  "gpui",
  "gpui-component",
+ "serde_json",
  "tokio",
 ]
 

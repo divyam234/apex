@@ -34,16 +34,20 @@ channel. Cancellation uses the same shared token as the CLI.
 ## Workspace behavior
 
 The GUI can open a real workspace, load its manifest, index nested `*.request.toml` files, group
-them by collection/folder, and open them from the tree. A loaded request retains fields that do not
-currently have a structured editor. Atomic saves use the workspace repository and its loaded-file
+them by collection/folder, and open them from the tree. The request surface provides validated
+editors for URL, ordered query fields, duplicate headers, authentication, all body variants, request
+settings, and documentation. Form and header rows preserve enabled state and sensitivity; multipart
+rows preserve text/file kind and content type. Invalid editor content blocks save and send rather
+than silently dropping fields. Atomic saves use the workspace repository and its loaded-file
 fingerprint; a changed file is rejected rather than overwritten.
 
 New unsaved requests use the application-state draft workspace. The request surface now wires the
 resource-aware session model into a visual multi-document tab strip. Opening a workspace request
 creates or activates its tab, switching tabs restores editor and conflict state, saved tabs can be
-closed, dirty tabs are guarded, and history restores open as separate draft tabs. Preview, pin,
-reorder, close-other/right, and reopen-closed behavior remain model-level capabilities that are not
-yet exposed as complete native interactions.
+closed, dirty tabs are guarded, and history restores open as separate draft tabs. Pin/unpin,
+preview promotion, deterministic left/right reorder, reopen-closed, close-other/right, bounded
+overflow navigation, and startup restoration are exposed in the native tab strip. Drag-and-drop
+reordering remains intentionally outside the current phase.
 
 ## Validation boundary
 
@@ -51,3 +55,13 @@ The native binary compiles and links on Linux. A launch under Xvfb reached GPUI 
 initialization but the container exposes no supported GPU device, so a visual render smoke test is
 not claimed. This is distinct from compilation or linking failure; desktop Wayland/X11 smoke tests
 remain a release-host gate.
+
+## Workspace tools, automation, protocols, and lifecycle
+
+The right dock includes Workspace Tools, Protocols, and Lifecycle panels. Workspace Tools manages environments, validated preferences, indexed search, import previews, and redacted code generation. The Automation panel executes real workspace HTTP requests with bounded concurrency, retries, cancellation, and deterministic reports. Protocols exposes GraphQL validation/building, bounded WebSocket/SSE session logs, and gRPC descriptor validation/reflection requests. Lifecycle exposes OpenAPI generation, loopback mock control, guarded Git operations, capability-approved plugin validation, and redacted AI preview/confirmation.
+
+Live WebSocket/SSE transports, production gRPC networking, bundled WebAssembly execution, and remote AI provider adapters remain explicit external boundaries.
+
+## Keyboard and bounded rendering
+
+Request tabs support Ctrl/Cmd+PageUp and Ctrl/Cmd+PageDown navigation plus Ctrl/Cmd+Shift+T reopen. The visible-tab limit is persisted and clamped to 1–20. History, search results, response previews, collection execution, and protocol event logs use explicit bounds to avoid unbounded desktop rendering or memory growth.

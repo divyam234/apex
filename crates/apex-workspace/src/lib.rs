@@ -229,6 +229,65 @@ impl WorkspaceRepository {
         atomic_write_checked(path, content.as_bytes(), expected)
     }
 
+    pub fn move_request(
+        &self,
+        source: &Path,
+        target: &Path,
+        expected: FileFingerprint,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        validate_request_mutation_target(&self.root, target)?;
+        let loaded = self.load_request(source)?;
+        if loaded.fingerprint != expected {
+            return Err(WorkspaceError::ExternalChange(source.to_owned()));
+        }
+        reject_symlink(source)?;
+        if target.exists() {
+            return Err(WorkspaceError::AlreadyExists(target.to_owned()));
+        }
+        fs::rename(source, target)?;
+        self.load_request(target).map(|loaded| loaded.fingerprint)
+    }
+
+    pub fn duplicate_request(
+        &self,
+        source: &Path,
+        target: &Path,
+        expected: FileFingerprint,
+    ) -> Result<FileFingerprint, WorkspaceError> {
+        validate_request_mutation_target(&self.root, target)?;
+        let loaded = self.load_request(source)?;
+        if loaded.fingerprint != expected {
+            return Err(WorkspaceError::ExternalChange(source.to_owned()));
+        }
+        reject_symlink(source)?;
+        if target.exists() {
+            return Err(WorkspaceError::AlreadyExists(target.to_owned()));
+        }
+        let target_slug = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".request.toml"))
+            .ok_or_else(|| WorkspaceError::InvalidPath(target.display().to_string()))?;
+        let mut document = loaded.value;
+        document.request.id = StableId::parse(target_slug)
+            .map_err(|error| WorkspaceError::InvalidFormat(error.to_string()))?;
+        self.save_request(target, &document, None, &SecretLeakDetector::default())
+    }
+
+    pub fn delete_request(
+        &self,
+        path: &Path,
+        expected: FileFingerprint,
+    ) -> Result<(), WorkspaceError> {
+        let loaded = self.load_request(path)?;
+        if loaded.fingerprint != expected {
+            return Err(WorkspaceError::ExternalChange(path.to_owned()));
+        }
+        reject_symlink(path)?;
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
     pub fn list_requests(&self) -> Result<Vec<WorkspaceRequestEntry>, WorkspaceError> {
         let collections_root = self.root.join("collections");
         if !collections_root.exists() {
@@ -1143,6 +1202,42 @@ fn validate_relative_resource_path(value: &str) -> Result<String, WorkspaceError
     }
 }
 
+fn reject_symlink(path: &Path) -> Result<(), WorkspaceError> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        Err(WorkspaceError::SymbolicLink(path.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_request_mutation_target(root: &Path, path: &Path) -> Result<(), WorkspaceError> {
+    ensure_inside(root, path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| WorkspaceError::InvalidPath(path.display().to_string()))?;
+    if !file_name.ends_with(".request.toml") {
+        return Err(WorkspaceError::InvalidPath(
+            "request paths must end with .request.toml".to_owned(),
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| WorkspaceError::InvalidPath(path.display().to_string()))?;
+    if !parent.is_dir() {
+        return Err(WorkspaceError::InvalidPath(format!(
+            "request target parent does not exist: {}",
+            parent.display()
+        )));
+    }
+    let canonical_root = fs::canonicalize(root)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(WorkspaceError::PathTraversal(path.display().to_string()));
+    }
+    Ok(())
+}
+
 fn ensure_inside(root: &Path, path: &Path) -> Result<(), WorkspaceError> {
     let relative = path
         .strip_prefix(root)
@@ -1583,6 +1678,109 @@ kind = "empty"
         let parsed = parse_request(&formatted).expect("multipart request parses");
         assert_eq!(parsed, document);
         assert_eq!(format_request(&parsed), formatted);
+    }
+
+    #[test]
+    fn request_mutations_are_fingerprint_guarded_and_rekey_duplicates() {
+        let root = temporary_directory("request-mutations");
+        let repository = WorkspaceRepository::new(&root).expect("valid repository");
+        let manifest =
+            WorkspaceManifest::new(StableId::parse("workspace-1").expect("valid id"), "Demo");
+        repository.initialize(&manifest).expect("initializes");
+        repository
+            .create_collection(
+                "users",
+                &CollectionDocument::new(StableId::parse("users").expect("valid id"), "Users"),
+            )
+            .expect("collection");
+
+        let source = repository
+            .request_path("users", "get-user")
+            .expect("source");
+        let source_fingerprint = repository
+            .save_request(
+                &source,
+                &RequestDocument::new(sample_request()),
+                None,
+                &SecretLeakDetector::default(),
+            )
+            .expect("source save");
+        let duplicate = repository
+            .request_path("users", "copy-user")
+            .expect("duplicate");
+        let duplicate_fingerprint = repository
+            .duplicate_request(&source, &duplicate, source_fingerprint)
+            .expect("duplicate request");
+        assert_eq!(
+            repository
+                .load_request(&duplicate)
+                .expect("loads duplicate")
+                .value
+                .request
+                .id
+                .as_str(),
+            "copy-user"
+        );
+
+        let moved = repository
+            .request_path("users", "moved-user")
+            .expect("moved");
+        let moved_fingerprint = repository
+            .move_request(&duplicate, &moved, duplicate_fingerprint)
+            .expect("moves request");
+        assert!(!duplicate.exists());
+        assert!(moved.exists());
+
+        fs::write(
+            &moved,
+            format_request(&RequestDocument::new(sample_request())),
+        )
+        .expect("external edit");
+        assert!(matches!(
+            repository.delete_request(&moved, moved_fingerprint),
+            Err(WorkspaceError::ExternalChange(_))
+        ));
+        let current = repository
+            .load_request(&moved)
+            .expect("current")
+            .fingerprint;
+        repository
+            .delete_request(&moved, current)
+            .expect("deletes request");
+        assert!(!moved.exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn request_mutations_reject_targets_outside_workspace() {
+        let root = temporary_directory("request-mutation-containment");
+        let repository = WorkspaceRepository::new(&root).expect("valid repository");
+        let manifest =
+            WorkspaceManifest::new(StableId::parse("workspace-1").expect("valid id"), "Demo");
+        repository.initialize(&manifest).expect("initializes");
+        repository
+            .create_collection(
+                "users",
+                &CollectionDocument::new(StableId::parse("users").expect("valid id"), "Users"),
+            )
+            .expect("collection");
+        let source = repository
+            .request_path("users", "get-user")
+            .expect("source");
+        let fingerprint = repository
+            .save_request(
+                &source,
+                &RequestDocument::new(sample_request()),
+                None,
+                &SecretLeakDetector::default(),
+            )
+            .expect("save");
+        let outside = root.parent().expect("parent").join("outside.request.toml");
+        assert!(matches!(
+            repository.move_request(&source, &outside, fingerprint),
+            Err(WorkspaceError::PathTraversal(_))
+        ));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

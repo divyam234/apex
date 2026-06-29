@@ -1,4 +1,5 @@
 use apex_domain::StableId;
+use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
@@ -44,6 +45,7 @@ impl RequestTabState {
 pub enum CloseTabError {
     InvalidIndex(usize),
     UnsavedChanges { index: usize, title: String },
+    PinnedTab { index: usize, title: String },
 }
 
 impl Display for CloseTabError {
@@ -53,6 +55,7 @@ impl Display for CloseTabError {
             Self::UnsavedChanges { title, .. } => {
                 write!(formatter, "tab '{title}' has unsaved changes")
             }
+            Self::PinnedTab { title, .. } => write!(formatter, "tab '{title}' is pinned"),
         }
     }
 }
@@ -81,6 +84,88 @@ impl WorkspaceSession {
             recently_closed: VecDeque::new(),
             maximum_recently_closed,
         }
+    }
+
+    pub fn to_json(&self) -> Value {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let resource = match &tab.resource {
+                    ResourceIdentity::Draft(id) => json!({"kind": "draft", "value": id.as_str()}),
+                    ResourceIdentity::WorkspaceRequest(path) => json!({
+                        "kind": "workspace_request",
+                        "value": path.to_string_lossy(),
+                    }),
+                };
+                json!({
+                    "resource": resource,
+                    "title": tab.title,
+                    "dirty": tab.dirty,
+                    "pinned": tab.pinned,
+                    "preview": tab.preview,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "version": 1,
+            "active_index": self.active_index,
+            "tabs": tabs,
+        })
+    }
+
+    pub fn from_json(value: &Value, maximum_recently_closed: usize) -> Result<Self, String> {
+        if value.get("version").and_then(Value::as_u64) != Some(1) {
+            return Err("unsupported tab session version".to_owned());
+        }
+        let raw_tabs = value
+            .get("tabs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "tab session is missing tabs".to_owned())?;
+        let mut tabs = Vec::with_capacity(raw_tabs.len());
+        for raw in raw_tabs {
+            let resource = raw
+                .get("resource")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "tab session contains an invalid resource".to_owned())?;
+            let kind = resource
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "tab resource is missing its kind".to_owned())?;
+            let value = resource
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "tab resource is missing its value".to_owned())?;
+            let resource = match kind {
+                "draft" => ResourceIdentity::Draft(
+                    StableId::parse(value).map_err(|error| error.to_string())?,
+                ),
+                "workspace_request" => ResourceIdentity::WorkspaceRequest(PathBuf::from(value)),
+                _ => return Err(format!("unsupported tab resource kind '{kind}'")),
+            };
+            tabs.push(RequestTabState {
+                resource,
+                title: raw
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "tab session contains a tab without a title".to_owned())?
+                    .to_owned(),
+                dirty: raw.get("dirty").and_then(Value::as_bool).unwrap_or(false),
+                pinned: raw.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+                preview: raw.get("preview").and_then(Value::as_bool).unwrap_or(false),
+            });
+        }
+        let active_index = value
+            .get("active_index")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+            .filter(|index| *index < tabs.len());
+        Ok(Self {
+            tabs,
+            active_index,
+            recently_closed: VecDeque::new(),
+            maximum_recently_closed,
+        })
     }
 
     pub fn tabs(&self) -> &[RequestTabState] {
@@ -145,6 +230,19 @@ impl WorkspaceSession {
         Ok(())
     }
 
+    pub fn set_preview(&mut self, index: usize, preview: bool) -> Result<(), CloseTabError> {
+        let tab = self
+            .tabs
+            .get_mut(index)
+            .ok_or(CloseTabError::InvalidIndex(index))?;
+        tab.preview = preview && !tab.dirty && !tab.pinned;
+        Ok(())
+    }
+
+    pub fn recently_closed_count(&self) -> usize {
+        self.recently_closed.len()
+    }
+
     pub fn set_pinned(&mut self, index: usize, pinned: bool) -> Result<(), CloseTabError> {
         let tab = self
             .tabs
@@ -186,6 +284,12 @@ impl WorkspaceSession {
                 title: tab.title.clone(),
             });
         }
+        if tab.pinned {
+            return Err(CloseTabError::PinnedTab {
+                index,
+                title: tab.title.clone(),
+            });
+        }
         self.force_close(index)
     }
 
@@ -215,12 +319,19 @@ impl WorkspaceSession {
             .tabs
             .iter()
             .enumerate()
-            .find(|(index, tab)| *index != keep && tab.dirty)
+            .find(|(index, tab)| *index != keep && (tab.dirty || tab.pinned))
         {
-            return Err(CloseTabError::UnsavedChanges {
-                index,
-                title: tab.title.clone(),
-            });
+            return if tab.dirty {
+                Err(CloseTabError::UnsavedChanges {
+                    index,
+                    title: tab.title.clone(),
+                })
+            } else {
+                Err(CloseTabError::PinnedTab {
+                    index,
+                    title: tab.title.clone(),
+                })
+            };
         }
         let kept_resource = self.tabs[keep].resource.clone();
         let removed = self
@@ -241,12 +352,20 @@ impl WorkspaceSession {
         if let Some((offset, tab)) = self.tabs[index + 1..]
             .iter()
             .enumerate()
-            .find(|(_, tab)| tab.dirty)
+            .find(|(_, tab)| tab.dirty || tab.pinned)
         {
-            return Err(CloseTabError::UnsavedChanges {
-                index: index + 1 + offset,
-                title: tab.title.clone(),
-            });
+            let blocked_index = index + 1 + offset;
+            return if tab.dirty {
+                Err(CloseTabError::UnsavedChanges {
+                    index: blocked_index,
+                    title: tab.title.clone(),
+                })
+            } else {
+                Err(CloseTabError::PinnedTab {
+                    index: blocked_index,
+                    title: tab.title.clone(),
+                })
+            };
         }
         let removed = self.tabs.drain(index + 1..).collect::<Vec<_>>();
         for tab in removed {
@@ -406,6 +525,79 @@ mod tests {
         session.close(1).expect("closes active B");
 
         assert_eq!(session.active().map(|tab| tab.title.as_str()), Some("C"));
+    }
+
+    #[test]
+    fn pinned_tabs_block_bulk_close_operations() {
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("a")),
+            "A",
+        ));
+        let pinned = session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("b")),
+            "B",
+        ));
+        session.set_pinned(pinned, true).expect("pins B");
+
+        assert!(matches!(
+            session.close_to_right(0),
+            Err(CloseTabError::PinnedTab { index: 1, .. })
+        ));
+        assert!(matches!(
+            session.close_others(0),
+            Err(CloseTabError::PinnedTab { index: 1, .. })
+        ));
+        assert_eq!(session.tabs().len(), 2);
+    }
+
+    #[test]
+    fn session_json_round_trip_preserves_order_pin_and_active_tab() {
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("a")),
+            "A",
+        ));
+        let b = session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("b")),
+            "B",
+        ));
+        session.set_pinned(b, true).expect("pins B");
+        session.reorder(1, 0).expect("moves B first");
+        session.activate(1).expect("activates A");
+
+        let restored = WorkspaceSession::from_json(&session.to_json(), 20).expect("restores");
+
+        assert_eq!(restored.tabs()[0].title, "B");
+        assert!(restored.tabs()[0].pinned);
+        assert_eq!(restored.active().map(|tab| tab.title.as_str()), Some("A"));
+    }
+
+    #[test]
+    fn preview_can_be_promoted_without_changing_identity() {
+        let mut session = WorkspaceSession::default();
+        let resource = ResourceIdentity::Draft(id("preview"));
+        let mut tab = RequestTabState::saved(resource.clone(), "Preview");
+        tab.preview = true;
+        let index = session.open(tab);
+
+        session.set_preview(index, false).expect("promotes preview");
+
+        assert_eq!(session.tabs()[index].resource, resource);
+        assert!(!session.tabs()[index].preview);
+    }
+
+    #[test]
+    fn recently_closed_count_tracks_reopen() {
+        let mut session = WorkspaceSession::default();
+        session.open(RequestTabState::saved(
+            ResourceIdentity::Draft(id("a")),
+            "A",
+        ));
+        session.close(0).expect("closes");
+        assert_eq!(session.recently_closed_count(), 1);
+        session.reopen_closed().expect("reopens");
+        assert_eq!(session.recently_closed_count(), 0);
     }
 
     #[test]
